@@ -64,3 +64,9 @@ Emeritus Maintainers
 - [Tigran Najaryan](https://github.com/tigrannajaryan)
 
 Learn more about roles in the [community repository](https://github.com/open-telemetry/community/blob/main/guides/contributor/membership.md).
+
+## Atakama-Technologies
+Le but est de faire une version ou je puisse avoir assez de fonctionnnalités pour etre utilisable pour les clients.
+Il n'est pas necessaire d'avoir tout les "exporter" mais la version de TEST ne permet pas de faire un "hostMetric". c'est à dire un erécuipération des métriques systemes.
+Sur la version PROD contrib la déclaration des toules les métriques systemes
+
