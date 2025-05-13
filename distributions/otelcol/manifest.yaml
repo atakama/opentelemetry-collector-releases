@@ -60,9 +60,11 @@ providers:
   - gomod: go.opentelemetry.io/collector/confmap/provider/yamlprovider v1.28.1
 
 replaces:
+  # a list of "replaces" directives that will be part of the resulting go.mod
   - extensionlinux => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\ExtensionLinux
   - mySystem => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\mySystem
-  #- go.opentelemetry.io/collector/pdata => ../../pdata
+  - go.opentelemetry.io/collector/pdata => ../../pdata
+  - go.opentelemetry.io/collector/pdata/pprofile => ../../pdata/pprofile
   #- go.opentelemetry.io/collector/exporter/nudgehttpexporter => C:\opentelemetry-collector-releases\distributions\exporter\nudgehttpexporter
   #- go.opentelemetry.io/collector/exporter/nudgedebugexporter => C:\opentelemetry-collector-releases\distributions\exporter\nudgedebugexporter
   #- go.opentelemetry.io/collector/pdata/ptrace/ptracenudge => ../../pdata/ptrace/ptracenudge
