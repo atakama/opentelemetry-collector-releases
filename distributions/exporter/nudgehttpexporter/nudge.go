@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
-	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,19 +16,33 @@ import (
 	"io"
 	"math/big"
 	mySystem "mySystem"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/fatih/structs"
+	extensionlinux "extensionlinux"
 
-	cpu3 "github.com/shirou/gopsutil/v3/cpu"
+	"gonum.org/v1/gonum/stat"
+
+	"github.com/fatih/structs"
+	"github.com/google/uuid"
+	gateway "github.com/jackpal/gateway"
+	"github.com/mssola/user_agent"
+
+	"github.com/shirou/gopsutil/v3/cpu"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -50,14 +63,64 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace/ptracenudge"
 )
 
+const (
+	LAYER_TYPE_HTTP = "HTTP"
+	LAYER_TYPE_SQL  = "SQL"
+
+	// Marquée pour ne pas attendre la fin puis être envoyé dans le rawdata
+	Urlid_NOWAITANDSEND = 0
+	// Marquée pour attendre la fin puis être envoyé dans le rawdata si pas de parentSpanId
+	Urlid_WAITANDSEND = 1
+	// Marquée comme non envoyée et supprimée de la liste des transactions
+	Urlid_NOWAITANDNOSEND = 2
+
+	// 1 => erreur HTTP , 2 => erreur SQL
+	Error_HTTP = 1
+	Error_SQL  = 2
+)
+
+type Telemetry struct {
+	Name        string
+	Version     string
+	Language    string
+	ServiceName string
+}
+
+func (This *Telemetry) ToString() string {
+	return fmt.Sprintf("Telemetry Sdk : %v %v , %v , %v",
+		This.Name,
+		This.Version,
+		This.Language,
+		This.ServiceName)
+}
+
+type Host struct {
+	Name string
+	Id   string
+	Arch string
+}
+
+func (This *Host) ToString() string {
+	return fmt.Sprintf("Host Sdk : %v, %v, %v",
+		This.Name,
+		This.Id,
+		This.Arch,
+	)
+}
+
+type Resource struct {
+	Telemetry Telemetry
+	Host      Host
+}
+
 type baseExporter struct {
 	// Input configuration.
 	config      *Config
 	client      *http.Client
-	tracesURL   string
-	metricsURL  string
-	logsURL     string
-	profilesURL string
+	tracesURL   string // URL for traces
+	metricsURL  string // URL for metrics
+	logsURL     string // URL for logs
+	profilesURL string // URL for profiles
 	logger      *zap.Logger
 	settings    component.TelemetrySettings
 	// Default user-agent header.
@@ -66,17 +129,101 @@ type baseExporter struct {
 	nudgeExporter *NudgeExporter
 }
 
+type ErrorX struct {
+	*pdata.Error
+	Stack           string
+	ConstructorName string
+}
+
+func newError() *ErrorX {
+	r := &ErrorX{
+		Error: &pdata.Error{},
+	}
+	return r
+}
+func (e *ErrorX) ToError() *pdata.Error {
+	p := &pdata.Error{}
+	p.Reset()
+	p.ServerId = e.ServerId
+	p.Code = e.Code
+	p.StartTime = e.StartTime
+	p.Message = e.Message
+	p.JvmStacktrace = e.JvmStacktrace
+	p.Stacktrace = e.Stacktrace
+	return p
+}
+
+/*
+En Go, tu ne peux pas mélanger :
+les initialisations positionnelles (s)
+avec des initialisations nommées (Error: nil)
+C’est soit tout positionnel (rare, très fragile), soit tout nommé (fortement recommandé ✅).
+*/
+type SpanX struct {
+	ptrace.Span
+	ErrorX  *ErrorX
+	ErrorsX []*ErrorX
+}
+
+func newSpanX(s ptrace.Span) SpanX {
+	return SpanX{
+		Span:    s,
+		ErrorX:  nil,
+		ErrorsX: []*ErrorX{},
+	}
+}
+
 const (
 	headerRetryAfter         = "Retry-After"
 	maxHTTPResponseReadBytes = 1024 * 1024
 
 	jsonContentType     = "application/json"
-	protobufContentType = "application/octet-stream" //"application/x-protobuf"
+	protobufContentType = "application/x-protobuf"
+)
+
+var (
+	Headers = map[string]string{
+		"content-length-uncompressed": "Content-Length",
+		"content-length":              "Content-Length",
+	}
 )
 
 const indexRawdata_MIN = -1
 
-//var configurationNudge *ini.File = nil
+var filename_N int = 0
+
+type Mesure[T any] struct {
+	StartTime time.Time `json:"startTime"`
+	EndTime   time.Time `json:"endTime"`
+	Values    []T       `json:"values"`
+	Value     T         `json:"value"`
+}
+
+type Metrics struct {
+	// CPU usage in percentage
+	CPUUsage Mesure[float64] `json:"cpuUsage"`
+	// Memory usage in bytes
+	//MemoryUsage Mesure[int64] `json:"memoryUsage"`
+	// Disk usage in bytes
+	//DiskUsage Mesure[int64] `json:"diskUsage"`
+	// Network usage in bytes
+	//NetworkUsage Mesure[int64] `json:"networkUsage"`
+}
+
+// Metriques systeme interne sans passer pas OTLP
+var metricsInterne Metrics = Metrics{}
+var once sync.Once
+
+// var configurationNudge *ini.File = nil
+type Float64Array []float64
+
+func (fa Float64Array) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	for _, f := range fa {
+		f = float64(int(f*1)) / 1.0 // arrondi à 1 chiffres après la virgule
+		enc.AppendFloat64(f)
+	}
+	return nil
+}
 
 // Create new exporter.
 func newExporter(cfg component.Config, set exporter.Settings) (*baseExporter, error) {
@@ -91,34 +238,48 @@ func newExporter(cfg component.Config, set exporter.Settings) (*baseExporter, er
 
 	nudgeExporter_ := newNudgeExporter(oCfg)
 
-	/*
-		var err error
-		configurationNudge, err = ini.Load("configurationNudge.ini")
-		if err != nil {
-			log.Fatalf("Erreur lors du chargement du fichier INI: %v", err)
-		}
-	*/
-
 	userAgent := fmt.Sprintf("%s/%s (%s/%s)",
 		set.BuildInfo.Description, set.BuildInfo.Version, runtime.GOOS, runtime.GOARCH)
 
 	// client construction is deferred to start
-	return &baseExporter{
+	be := &baseExporter{
 		config:        oCfg,
 		logger:        set.Logger,
 		userAgent:     userAgent,
 		settings:      set.TelemetrySettings,
 		nudgeExporter: nudgeExporter_,
-	}, nil
+	}
+
+	// Lancement du thread unique pour le CPU
+	once.Do(func() {
+		go func(e *baseExporter) {
+			for {
+				metricsInterne.CPUUsage.StartTime = time.Now().UTC()
+				metricsInterne.CPUUsage.Values, _ = cpu.Percent(time.Duration(e.nudgeExporter.Parent.RefreshLoadCPU)*time.Second, true)
+				metricsInterne.CPUUsage.EndTime = time.Now().UTC()
+				metricsInterne.CPUUsage.Value = stat.Mean(metricsInterne.CPUUsage.Values, nil)
+				if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
+					e.logger.Info("CPU", zap.Int("total", len(metricsInterne.CPUUsage.Values)), zap.Array("pourcentages", Float64Array(metricsInterne.CPUUsage.Values)))
+				}
+
+				time.Sleep(time.Second)
+			}
+		}(be)
+	})
+
+	return be, nil
 }
 
 // start actually creates the HTTP client. The client construction is deferred till This point as This
 // is the only place we get hold of Extensions which are required to construct auth round tripper.
 func (e *baseExporter) start(ctx context.Context, host component.Host) error {
-	client, err := e.config.ClientConfig.ToClient(ctx, host, e.settings)
-	if err != nil {
-		return err
-	}
+	//client, err := e.config.ClientConfig.ToClient(ctx, host, e.settings)
+	client := &http.Client{}
+	/*
+		if err != nil {
+			return err
+		}
+	*/
 	e.client = client
 	return nil
 }
@@ -142,6 +303,7 @@ state = *StateMutable (0)
 func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 
 	// Creation du This.Rawdata
+
 	if e.nudgeExporter.Rawdata == nil {
 		e.nudgeExporter.CreateRawdata()
 	}
@@ -150,22 +312,1450 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 	tr := ptracenudge.NewExportRequestFromTraces(td)
 	e.nudgeExporter.TracesExportRequest2Rawdata(&tr)
 
-	var err error
-	var request []byte
-	switch e.config.Encoding {
-	case EncodingJSON:
-		request, err = e.nudgeExporter.MarshalJSON()
-	case EncodingProto:
-		request, err = e.nudgeExporter.MarshalProto()
-	default:
-		err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+	application_ids := extensionlinux.Reduce(e.nudgeExporter.Transactions, []string{}, func(ts []string, t *TransactionNudge, i int) []string {
+		if !slices.Contains(ts, t.TAG.ApplicationID) {
+			ts = append(ts, t.TAG.ApplicationID)
+		}
+		return ts
+	})
+
+	var error_ error = nil
+	for _, application_id := range application_ids {
+		languages, urlAppId := e.nudgeExporter.SendTransactions(application_id)
+
+		if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
+			fmt.Println(fmt.Sprintf("Transaction[%v] , language=%v , app_id=%v", len(e.nudgeExporter.Rawdata.Transactions), languages, application_id))
+		}
+
+		var err error = nil
+		var request []byte
+		switch e.config.Encoding {
+		case EncodingJSON:
+			request, err = e.nudgeExporter.MarshalJSON()
+		case EncodingProto:
+			request, err = e.nudgeExporter.MarshalProto()
+		default:
+			err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		}
+
+		if err != nil {
+			return consumererror.NewPermanent(err)
+		}
+
+		if e.nudgeExporter.Parent.RecordCollecte {
+			e.nudgeExporter.FlushRawdataToFileDisk(request)
+		}
+
+		if urlAppId != nil {
+			errX := e.export(ctx, *urlAppId, request, e.tracesPartialSuccessHandler)
+			if error_ == nil && errX != nil {
+				error_ = errX
+			}
+		} else {
+			errX := e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler)
+			if error_ == nil && errX != nil {
+				error_ = errX
+			}
+		}
 	}
 
-	if err != nil {
-		return consumererror.NewPermanent(err)
+	return error_
+}
+
+// Equivalent du Object.keys en JS
+func GetKeys(obj pcommon.Map) []string {
+	keys := make([]string, 0, obj.Len())
+	for key := range obj.Range {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func GetNameType(attributes pcommon.Map) (string, int) {
+
+	keys := GetKeys(attributes)
+	// express.name , koa.name
+	kNames := extensionlinux.Reduce(keys, []string{}, func(a []string, e string, i int) []string {
+		if e[len(e)-5:] == ".name" {
+			return append(a, strings.Replace(e, ".name", "", 1))
+		}
+		return a
+	})
+	// express.type , koa.type
+	kTypes := extensionlinux.Reduce(keys, []string{}, func(a []string, e string, i int) []string {
+		if e[len(e)-5:] == ".type" {
+			return append(a, strings.Replace(e, ".type", "", 1))
+		}
+		return a
+	})
+	name, b := extensionlinux.Find(kNames, func(t string) bool {
+		_, i := extensionlinux.Find(kTypes, func(u string) bool {
+			return u == t
+		})
+		return i >= 0
+	})
+
+	/*
+		let keys = Object.keys(attributes);
+		// express.name , koa.name
+		let kNames = keys.reduce((a, e) => {
+		if (e.endsWith('.name')) a.push(e.replace('.name',''));
+		return a;
+		}, new Array());
+		// express.type , koa.type
+		let kTypes = keys.reduce((a, e) => {
+		if (e.endsWith('.type')) a.push(e.replace('.type',''));
+		return a;
+		}, new Array());
+		let name = kNames.find(t => kTypes.find(u => u == t));
+	*/
+
+	return name, b
+}
+
+func GetInstrumentType(scope pcommon.InstrumentationScope) *string {
+
+	name := scope.Name()
+	names := strings.Split(name, "/")
+	if len(names) >= 2 {
+		names1 := strings.Split(names[1], "-")
+		names1 = names1[1:]
+		name = strings.Join(names1, "-")
+		name = extensionlinux.ToUpperCase1(name)
+		return extensionlinux.StringPtr(name)
 	}
 
-	return e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler)
+	return nil
+
+	/*
+		if (typeof sps['instrumentationLibrary'] != 'undefined' && typeof sps['instrumentationLibrary'].name != 'undefined')
+		{
+		let name = sps['instrumentationLibrary']['name'];
+		let names = name.split('/');
+		if (names.length >= 2)
+		{
+			names = names[1].split('-');
+			names.shift();
+			name = names.join('-');
+			name = toUpperCase1.call(name);
+			return name;
+		}
+		}
+
+		return undefined;
+	*/
+
+}
+
+func GetUuid(name string) uuid.UUID {
+	// Utilisation d'un namespace (par exemple, NamespaceDNS)
+	namespace := uuid.NameSpaceDNS
+
+	// Générer un UUID v5 basé sur la chaîne "atakama"
+	uuidFromString := uuid.NewMD5(namespace, []byte(name)) // ou uuid.NewSHA1()
+
+	return uuidFromString
+}
+
+func (This *NudgeExporter) AddAllHeaders(sps SpanX) {
+	attributes := sps.Attributes()
+	keys := GetKeys(attributes)
+
+	keysResponse := extensionlinux.Filter(keys, func(k string) bool {
+		return extensionlinux.StartsWith(k, "http.request.header.") // || k.startsWith('http.request.');    // SemanticAttributes.HTTP_RESPONSE_CONTENT_LENGTH_UNCOMPRESSED
+	})
+
+	for _, kr := range keysResponse {
+		headerName := strings.Replace(kr, "http.request.header.", "", -1)
+		headerName = strings.ReplaceAll(headerName, "_", "-")
+
+		if Headers[headerName] != "" {
+			headerName = Headers[headerName]
+		} else {
+		}
+
+		headerNameT := strings.Split(headerName, "-")
+		headerNameT = extensionlinux.Map(headerNameT, func(e string) string {
+			return extensionlinux.ToUpperCase1(e)
+		})
+		headerNameS := strings.Join(headerNameT, "-")
+
+		if true /*|| ["Content-Type"].includes()*/ {
+			kv := &pdata.KeyValue{} //new proto.org.nudge.buffer.KeyValue();
+			kv.Reset()
+			kv.Key = extensionlinux.StringPtr(headerNameS)
+
+			if v, b := attributes.Get(kr); b { // (Array.isArray(attributes[kr]) ?
+				switch v.AsRaw().(type) {
+				case []any:
+					v1 := extensionlinux.Map(v.Slice().AsRaw(), func(e any) string {
+						return fmt.Sprintf("%v", e)
+					})
+					v1S := strings.Join(v1, ",")
+					kv.Value = extensionlinux.StringPtr(v1S)
+
+				default:
+					v, b := attributes.Get(kr)
+					if b {
+						kv.Value = extensionlinux.StringPtr(v.AsString())
+					} else {
+						kv.Value = extensionlinux.StringPtr("?")
+					}
+				}
+
+				pkv := &pdata.Param{}
+				pkv.Reset()
+				pkv.Key = kv.Key
+				pkv.Value = kv.Value
+
+				This.Transaction.Headers = append(This.Transaction.GetHeaders(), pkv)
+			}
+		}
+	}
+}
+
+func (This *NudgeExporter) AddAllExtendedcodes(sps SpanX) {
+	attributes := sps.Attributes()
+	keys := GetKeys(attributes)
+
+	keyValues := This.Transaction.GetExtendedCodes() //getExtendedcodesList();
+	/*
+		  if (keyValues.findIndex(e => e.getKey() == "OTEL.traceId") < 0)
+		  {
+			if (sps._spanContext && sps._spanContext.traceId)
+			{
+			  let kv = new proto.org.nudge.buffer.KeyValue();
+			  kv.setKey("OTEL.traceId");
+			  kv.setValue(sps._spanContext.traceId.toUpperCase());
+			  This.Transaction.addExtendedcodes(kv);
+			}
+			if (sps._spanContext && sps._spanContext.spanId)
+			{
+			  let kv = new proto.org.nudge.buffer.KeyValue();
+			  kv.setKey("OTEL.spanId");
+			  kv.setValue(sps._spanContext.spanId.toUpperCase());
+			  This.Transaction.addExtendedcodes(kv);
+			}
+		  }
+	*/
+
+	This.Transaction.InsertExtendedCode(string(semconv.HTTPMethodKey), string(semconv.HTTPMethodKey), attributes)
+
+	filterHeader := This.Parent.FilterHeader
+	headers := []string{"http.request.header.", "http.response.header."}
+	for _, att := range keys {
+		for _, header := range headers {
+			if extensionlinux.StartsWith(att, header) && (len(filterHeader) == 0 || extensionlinux.FindIndex(filterHeader, func(e string) bool { return strings.ToLower(header) == strings.ToLower(e) }) >= 0) {
+				keyValue := &pdata.KeyValue{}
+				keyValue.Reset()
+				headKey := att[len(header):]
+				headKeys := strings.Split(headKey, "_")
+				headKeys = extensionlinux.Map(headKeys, func(e string) string { return extensionlinux.ToUpperCase1(e) })
+				headKey = header + strings.Join(headKeys, "-")
+				if extensionlinux.FindIndex(keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == headKey }) < 0 {
+					keyValue.Key = extensionlinux.StringPtr(headKey)
+					v2, _ := attributes.Get(att)
+					switch v2.AsRaw().(type) {
+					case []any:
+						keyValue.Value = extensionlinux.StringPtr(v2.Slice().At(0).AsString())
+					default:
+						keyValue.Value = extensionlinux.StringPtr(v2.AsString())
+					}
+					This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+				}
+			}
+		}
+	}
+
+	v, b := attributes.Get(string(semconv.HTTPUserAgentKey))
+	if b {
+		uaS := v.AsString()
+		browserInfo := user_agent.New(uaS)
+		name, version := browserInfo.Browser()
+
+		if browserInfo != nil {
+			keyValue := &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("Environnement.Navigateur")
+			keyValue.Value = extensionlinux.StringPtr(name + " " + version)
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("Environnement.OS")
+			keyValue.Value = extensionlinux.StringPtr(browserInfo.OSInfo().FullName)
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("Environnement.Platform")
+			keyValue.Value = extensionlinux.StringPtr(browserInfo.Platform())
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("Environnement.Engine")
+			s1, s2 := browserInfo.Engine()
+			keyValue.Value = extensionlinux.StringPtr(s1 + " " + s2)
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+		}
+	}
+
+	v, b = attributes.Get(string(semconv.NetPeerIPKey))
+	_, i2 := extensionlinux.Find(keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == "http.clientip" })
+	if i2 < 0 && b {
+		clientip := v.AsString()
+		rgx := regexp.MustCompile(`:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
+		matches := rgx.FindAllStringSubmatch(clientip, -1)
+
+		if len(matches) > 0 {
+			keyValue := &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip")
+			keyValue.Value = extensionlinux.StringPtr(matches[0][0][1:])
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+			This.Transaction.UserIp = extensionlinux.StringPtr(matches[0][0][1:])
+
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip6")
+			keyValue.Value = extensionlinux.StringPtr(clientip[0 : len(clientip)-len(matches[0][0])])
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+		} else {
+			keyValue := &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip")
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+			This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+			This.Transaction.UserIp = keyValue.Value
+		}
+	}
+
+	v, b = attributes.Get(string(semconv.HTTPStatusCodeKey))
+	_, i2 = extensionlinux.Find(keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == "http.status" })
+	if i2 < 0 && b {
+		keyValue := &pdata.KeyValue{}
+		keyValue.Reset()
+		keyValue.Key = extensionlinux.StringPtr("http.status")
+		keyValue.Value = extensionlinux.StringPtr(v.AsString())
+		This.Transaction.ExtendedCodes = append(This.Transaction.GetExtendedCodes(), keyValue)
+	}
+
+}
+
+func (This *NudgeExporter) AddAllExtendedcodesLayerDetails(sps SpanX, keyValues *[]*pdata.KeyValue) {
+	attributes := sps.Attributes()
+	keys := GetKeys(attributes)
+
+	filterHeader := This.Parent.FilterHeader
+	headers := []string{"http.request.header.", "http.response.header."}
+	for _, att := range keys {
+		for _, header := range headers {
+			if extensionlinux.StartsWith(att, header) && (len(filterHeader) == 0 || extensionlinux.FindIndex(filterHeader, func(e string) bool { return strings.ToLower(header) == strings.ToLower(e) }) >= 0) {
+				keyValue := &pdata.KeyValue{}
+				keyValue.Reset()
+				headKey := att[len(header):]
+				headKeys := strings.Split(headKey, "_")
+				headKeys = extensionlinux.Map(headKeys, func(e string) string { return extensionlinux.ToUpperCase1(e) })
+				headKey = header + strings.Join(headKeys, "-")
+				if extensionlinux.FindIndex(*keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == headKey }) < 0 {
+					keyValue.Key = extensionlinux.StringPtr(headKey)
+					v2, _ := attributes.Get(att)
+					switch v2.AsRaw().(type) {
+					case []any:
+						keyValue.Value = extensionlinux.StringPtr(v2.Slice().At(0).AsString())
+					default:
+						keyValue.Value = extensionlinux.StringPtr(v2.AsString())
+					}
+					*keyValues = append(*keyValues, keyValue)
+				}
+			}
+		}
+	}
+
+	v, b := attributes.Get(string(semconv.NetPeerIPKey))
+	_, i2 := extensionlinux.Find(*keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == "http.clientip" })
+	if i2 < 0 && b {
+		clientip := v.AsString()
+		rgx := regexp.MustCompile(`:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
+		matches := rgx.FindAllStringSubmatch(clientip, -1)
+
+		if len(matches) > 0 {
+			keyValue := &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip")
+			keyValue.Value = extensionlinux.StringPtr(matches[0][0][1:])
+			*keyValues = append(*keyValues, keyValue)
+
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip6")
+			keyValue.Value = extensionlinux.StringPtr(clientip[0 : len(clientip)-len(matches[0][0])])
+			*keyValues = append(*keyValues, keyValue)
+		} else {
+			keyValue := &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr("http.clientip")
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+			*keyValues = append(*keyValues, keyValue)
+		}
+	}
+
+	v, b = attributes.Get(string(semconv.HTTPStatusCodeKey))
+	_, i2 = extensionlinux.Find(*keyValues, func(e *pdata.KeyValue) bool { return e.GetKey() == "http.status" })
+	if i2 < 0 && b {
+		keyValue := &pdata.KeyValue{}
+		keyValue.Reset()
+		keyValue.Key = extensionlinux.StringPtr("http.status")
+		keyValue.Value = extensionlinux.StringPtr(v.AsString())
+		*keyValues = append(*keyValues, keyValue)
+	}
+
+}
+
+func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportRequest) {
+
+	resource := Resource{}
+
+	traces := tr.Traces()
+
+	rss := traces.ResourceSpans()
+	for iRss := range rss.Len() {
+		rs := rss.At(iRss)
+		attributesRS := rs.Resource().Attributes()
+
+		if v, b := attributesRS.Get(string(semconv.TelemetrySDKLanguageKey)); b {
+			resource.Telemetry.Language = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.TelemetrySDKVersionKey)); b {
+			resource.Telemetry.Version = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.TelemetrySDKNameKey)); b {
+			resource.Telemetry.Name = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.ServiceNameKey)); b {
+			resource.Telemetry.ServiceName = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.HostNameKey)); b {
+			resource.Host.Name = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.HostArchKey)); b {
+			resource.Host.Arch = v.AsString()
+		}
+		if v, b := attributesRS.Get(string(semconv.HostIDKey)); b {
+			resource.Host.Id = v.AsString()
+		}
+
+		fmt.Println(fmt.Sprintf("%v, %v", resource.Telemetry.ToString(), resource.Host.ToString()))
+
+		sss := rs.ScopeSpans()
+		for iSss := range sss.Len() {
+			ss := sss.At(iSss)
+			spans := ss.Spans()
+			scope := ss.Scope()
+			attributesS := scope.Attributes()
+			attributesS = attributesS
+
+			INSTRUMENT := GetInstrumentType(scope)
+			for iSps := range spans.Len() {
+				sps := newSpanX(spans.At(iSps))
+				//parentSpanID := sps.ParentSpanID().String()
+				//traceID := sps.TraceID().String()
+				//spanID := sps.SpanID().String()
+				attributes := sps.Attributes()
+
+				if v, b := attributes.Get("application_id"); b {
+					This.Transaction.TAG.ApplicationID = v.AsString()
+					This.Transaction.TAG.UrlAppId = This.Attributes2URL(This.Parent, attributes)
+				}
+
+				keys := GetKeys(attributes)
+				HTTP := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "http.") }) >= 0   //keys.findIndex(k => { return k.startsWith('http.'); }) >= 0;
+				NET := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "net.") }) >= 0     //keys.findIndex(k => { return k.startsWith('net.'); }) >= 0;
+				DB := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "db.") }) >= 0       //keys.findIndex(k => { return k.startsWith('db.'); }) >= 0;
+				GQL := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "graphql.") }) >= 0 //keys.findIndex(k => { return k.startsWith('graphql.'); }) >= 0;
+				var SERVEUR *string = nil
+				x, b := GetNameType(attributes)
+				if b >= 0 {
+					SERVEUR = extensionlinux.StringPtr(x)
+				}
+
+				uuid := GetUuid(sps.TraceID().String()).String()
+				This.Transaction, _ = extensionlinux.Find(This.Transactions, func(t *TransactionNudge) bool {
+					return t.GetUuid() == uuid
+				})
+				if This.Transaction == nil {
+					This.Transaction = newTransactionNudge()
+					This.Transactions = append(This.Transactions, This.Transaction)
+
+					This.Transaction.TAG.Correlationid = 0
+					// Il n'y a pas de traitement intermédiaire avant le profiling donc je désactive le Urlid_WAITANDSEND
+					This.Transaction.TAG.Urlid = Urlid_WAITANDSEND
+					This.Transaction.TAG.Serveur = nil
+
+					This.Transaction.Status = pdata.Transaction_OK.Enum()
+					This.Transaction.Uuid = extensionlinux.StringPtr(uuid)
+					attributesX := pcommon.NewMap()
+					attributes.CopyTo(attributesX)
+					attributesX.PutStr(pdata.SemanticAttributesX["UUID"], string(*This.Transaction.Uuid)) // this.urlDictionary.getUUID(sps._spanContext.traceId);
+					attributes = attributesX
+					if This.Parent.SessionId != "" {
+						This.Transaction.SessionId = extensionlinux.StringPtr(This.Parent.SessionId)
+					} else {
+						s := time.Now().Format("2006-01-02 15:04:05")
+						This.Transaction.SessionId = extensionlinux.StringPtr(GetUuid(s).String())
+					}
+				}
+
+				/*
+					let uuid = getUuid(sps['_spanContext']['traceId']);
+					this.transaction = this.transactions.find(t => t.getUuid() == uuid);
+					if (!this.transaction)
+					{
+					this.transaction = new proto.org.nudge.buffer.Transaction();
+					this.transactions.push(this.transaction);
+
+					this.transaction.TAG = {
+						correlationid : 0,
+						urlid : 1,
+						serveur : undefined,
+					};
+					// La transaction est marquée comme non envoyée et supprimée de la liste des transactions
+					// this.transaction.setUrlid(2);
+
+					this.transaction.setUuid(uuid);
+					// Creation ou pas du UUID pour le traceId de la session de l'URL a utiliser dans threadInfos
+					// this.transaction.setUuid(this.urlDictionary.makeUUID(getUrl(attributes)));
+
+					attributes[SemanticAttributes.UUID] = this.transaction.getUuid(); // this.urlDictionary.getUUID(sps._spanContext.traceId);
+					this.transaction.setSessionid( global.configurationAgentNodeJS.Nudge?.sessionId );
+					}
+				*/
+				if NET {
+					//n := 0
+				}
+
+				if (SERVEUR != nil || HTTP) && ((sps.Kind() == ptrace.SpanKindInternal /*|| sps.Kind() == ptrace.SpanKindUnspecified*/) || (sps.ParentSpanID().IsEmpty())) {
+					/*
+						TYPE
+						  SQL_REQUEST:2
+						  SUB_TRANSACTION:1
+						  TRANSACTION:0
+
+						STATUS
+						  KO:1
+						  OK:0
+
+						METHOD
+						  CONNECT:0
+						  DELETE:1
+						  GET:2
+						  HEAD:3
+						  OPTIONS:4
+						  POST:5
+						  PUT:6
+						  TRACE:7
+
+						peer = distant
+						host = local (serveur)
+						NET
+						  "net.host.ip", '::1'
+						  "net.host.name", 'localhost'
+						  "net.host.port", 8080
+						  "net.peer.ip", '::1'
+						  "net.peer.port", 49254
+						  "net.transport", 'ip_tcp'
+					*/
+
+					//this.transaction.setUpstreamagentid();
+					This.Transaction.UpstreamTxId = extensionlinux.StringPtr(sps.TraceID().String()) //sps?._spanContext?.traceId);
+					This.Transaction.UpstreamCorrelationId = extensionlinux.NumberPtr(This.Transaction.TAG.Correlationid)
+					This.Transaction.TAG.Correlationid++
+
+					peer := ""
+					if v1, b := attributes.Get(string(semconv.NetPeerNameKey)); b { //SemanticAttributes.NET_PEER); b {
+						v2, b := attributes.Get(string(semconv.NetHostPortKey))
+						if b {
+							peer = v1.AsString() + v2.AsString()
+						} else {
+							peer = v1.AsString()
+						}
+					} else if v1, b := attributes.Get(string(semconv.NetPeerNameKey)); b {
+						v2, b := attributes.Get(string(semconv.NetHostPortKey))
+						if b {
+							peer = v1.AsString() + v2.AsString()
+						} else {
+							peer = v1.AsString()
+						}
+					} else if v1, b := attributes.Get(string(semconv.NetPeerIPKey)); b {
+						v2, b := attributes.Get(string(semconv.NetHostPortKey))
+						if b {
+							peer = v1.AsString() + v2.AsString()
+						} else {
+							peer = v1.AsString()
+						}
+					}
+					peer = peer
+
+					// Seul les headers REQUEST sont pertinents
+					/*
+						let keysResponse = keys.filter(k => {
+							return k.startsWith('http.response.header.');// || k.startsWith('http.request.');    // SemanticAttributes.HTTP_RESPONSE_CONTENT_LENGTH_UNCOMPRESSED
+						});
+						keysResponse.forEach(kr => {
+							let headerName = kr.replace('http.response.header.','').replace(/_/gm,'-');
+							headerName = Headers[headerName] != undefined ? Headers[headerName] : headerName;
+							let header = new proto.org.nudge.buffer.Param();
+							header.setKey(headerName);
+							header.setValue(attributes[kr].toString());
+							this.transaction.addHeaders(header);
+						});
+					*/
+
+					This.AddAllHeaders(sps)
+					This.AddAllExtendedcodes(sps)
+
+					//let iname = name.indexOf('/');
+					//name = iname >= 0 ? name.substring(iname) : name;
+					if sps.ParentSpanID().IsEmpty() {
+						name := sps.Name()
+						This.Transaction.Code = extensionlinux.StringPtr(name)
+					}
+
+					//this.transaction.setSeg1id();
+					//this.transaction.setSeg2id();
+					//this.transaction.setSeg3id();
+					st := sps.StartTimestamp().AsTime()
+					et := sps.EndTimestamp().AsTime()
+					if !st.IsZero() && This.Transaction.StartTime == nil {
+						This.Transaction.StartTime = extensionlinux.NumberPtr(st.UTC().UnixMilli())
+					} else if !st.IsZero() && This.Transaction.StartTime != nil {
+						This.Transaction.StartTime = extensionlinux.NumberPtr(slices.Min([]int64{This.Transaction.GetStartTime(), st.UTC().UnixMilli()}))
+					}
+					This.Transaction.EndTime = extensionlinux.NumberPtr(slices.Max([]int64{This.Transaction.GetEndTime(), et.UTC().UnixMilli()}))
+
+					url, b := attributes.Get(string(semconv.HTTPURLKey))
+					if b {
+						// Notation DEBUG
+						This.Transaction.TAG.Code = This.Transaction.GetCode()
+						This.Transaction.TAG.TraceId = sps.TraceID().String() //sps._spanContext.traceId
+
+						paramsX := strings.SplitN(url.AsString(), "?", 2) // .split('?', 2);
+						if len(paramsX) >= 1 {
+							param := &pdata.Param{}
+							param.Reset()
+							param.Key = extensionlinux.StringPtr("url")
+							param.Value = extensionlinux.StringPtr(paramsX[0])
+							param.Type = extensionlinux.StringPtr("string")
+
+							This.Transaction.Params = append(This.Transaction.GetParams(), param)
+						}
+						if len(paramsX) >= 2 {
+							paramsX := strings.SplitN(paramsX[1], "&", 2)
+							params := extensionlinux.Map(paramsX, func(e string) *pdata.Param {
+								t := strings.SplitN(e, "=", 2)
+								if len(t) == 1 {
+									t = append(t, "")
+								}
+								r := &pdata.Param{}
+								r.Reset()
+								r.Key = extensionlinux.StringPtr(t[0])
+								r.Value = extensionlinux.StringPtr(t[1])
+								r.Type = extensionlinux.StringPtr("string")
+
+								return r
+							})
+
+							for _, kv := range params {
+								param := &pdata.Param{}
+								param.Reset()
+								param.Key = kv.Key
+								param.Value = kv.Value
+								param.Type = extensionlinux.StringPtr("string")
+
+								This.Transaction.Params = append(This.Transaction.GetParams(), param)
+							}
+						}
+					}
+
+					if v, b := attributes.Get(string(semconv.HTTPStatusCodeKey)); b {
+						This.Transaction.RespStatusCode = extensionlinux.NumberPtr(int32(v.Int())) // .setRespstatuscode(v);
+					}
+
+					/*
+						if (attributes && (includesOneField(attributes, [SemanticAttributes.HTTP_ERROR_NAME, SemanticAttributes.HTTP_ERROR_MESSAGE, /*SemanticAttributes.HTTP_STATUS_CODE, */
+					/*SemanticAttributes.HTTP_STATUS_TEXT,*+/ SemanticAttributes.HTTP_STACKTRACE]) || (attributes[SemanticAttributes.HTTP_STATUS_CODE] != undefined) && attributes[SemanticAttributes.HTTP_STATUS_CODE] >= 400 ))
+
+					 */
+					v, _ := attributes.Get(pdata.SemanticAttributesX["HTTP_STATUS_CODE"])
+					keys := GetKeys(attributes)
+					if (extensionlinux.IncludesOneField(keys, []string{pdata.SemanticAttributesX["HTTP_ERROR_NAME"], pdata.SemanticAttributesX["HTTP_ERROR_MESSAGE"], /*SemanticAttributes.HTTP_STATUS_CODE, */
+						/*SemanticAttributes.HTTP_STATUS_TEXT,*/ pdata.SemanticAttributesX["HTTP_STACKTRACE"]}) != nil || extensionlinux.IncludesOneField(keys, []string{string(semconv.HTTPStatusCodeKey)}) != nil) && v.Int() >= 400 {
+						error_ := newError()
+						//error_.setServerid();
+
+						if v, b := attributes.Get(pdata.SemanticAttributesX["HTTP_STATUS_CODE"]); b {
+							error_.Code = extensionlinux.StringPtr("Http status: " + v.AsString())
+						}
+
+						error_.StartTime = extensionlinux.NumberPtr(int64(sps.StartTimestamp()))
+
+						if v, b := attributes.Get(pdata.SemanticAttributesX["HTTP_ERROR_MESSAGE"]); b {
+							v2, b2 := attributes.Get(pdata.SemanticAttributesX["HTTP_ERROR_NAME"])
+							if b2 {
+								error_.Message = extensionlinux.StringPtr(v.AsString() + " - " + v2.AsString())
+							} else {
+								error_.Message = extensionlinux.StringPtr(v.AsString())
+							}
+						} else if v, b := attributes.Get(pdata.SemanticAttributesX["HTTP_STATUS_CODE"]); b && v.Int() >= 400 {
+							v2, b2 := attributes.Get(pdata.SemanticAttributesX["HTTP_STATUS_TEXT"])
+							v3, b3 := attributes.Get(pdata.SemanticAttributesX["HTTP_ERROR_NAME"])
+							if b2 {
+								error_.Message = extensionlinux.StringPtr(v2.AsString())
+							}
+							if b3 {
+								error_.Message = extensionlinux.StringPtr(*error_.Message + " - " + v3.AsString())
+							}
+						}
+						/*
+							if (typeof attributes[SemanticAttributes.HTTP_STACKTRACE] != 'undefined')
+							{
+							  let stack = attributes[SemanticAttributes.HTTP_STACKTRACE].join('\n');
+							  error.setStacktrace(stack.replace(/\n\s*at\s* /igm,'#'));
+							  error.setJvmstacktrace(stack.replace(/\n/gm,'\r\n\t'));
+							}
+						*/
+
+						This.Transaction.ErrorsX = append(This.Transaction.GetErrors(), error_)
+					}
+
+					// Erreurs remontées par serveur KOA mais pas par EXPRESS car le span se termine avant le catch de l'erreur
+					events := sps.Events()
+					for i := range events.Len() {
+						evnt := events.At(i)
+						if evnt.Name() == "exception" {
+							attr := evnt.Attributes()
+							error_ := newError()
+							//error_.setServerid();
+
+							v, _ := attr.Get("exception.type")
+							error_.Code = extensionlinux.StringPtr(v.AsString())
+							v, _ = attr.Get("startTime")
+							error_.StartTime = extensionlinux.NumberPtr(v.Int())
+
+							v, _ = attr.Get("exception.message")
+							error_.Message = extensionlinux.StringPtr(v.AsString())
+							v, _ = attr.Get("exception.stacktrace")
+
+							re := regexp.MustCompile(`(?i)\n\s*at\s*`)
+							error_.Stacktrace = extensionlinux.StringPtr(re.ReplaceAllString(v.AsString(), "#"))
+							re = regexp.MustCompile(`\n`)
+							error_.JvmStacktrace = extensionlinux.StringPtr(re.ReplaceAllString(v.AsString(), "\r\n\t"))
+
+							This.Transaction.ErrorsX = append(This.Transaction.GetErrors(), error_)
+							This.Transaction.Status = pdata.Transaction_KO.Enum()
+						}
+					}
+
+					// sps.status.code = 2 pour des erreurs SQL et 1 pour des erreurs HTTP
+					// un responseCode = 202 ==> sps.status.code = 1 or il n'y a pas d'erreur
+					_, b = attributes.Get(pdata.SemanticAttributesX["HTTP_ERROR_NAME"])
+					_, b2 := attributes.Get(pdata.SemanticAttributesX["HTTP_ERROR_MESSAGE"])
+					if b || b2 {
+						ts := pdata.Transaction_Status(0)
+						This.Transaction.Status = &ts
+					} else if v3, b3 := attributes.Get(pdata.SemanticAttributesX["HTTP_STATUS_CODE"]); b3 {
+						if v3.Int() >= 400 || v3.Int() <= 0 {
+							This.Transaction.Status = pdata.Transaction_KO.Enum()
+						}
+						//else
+						//  this.transaction.setStatus( proto.org.nudge.buffer.Transaction.Status.OK );
+					} else {
+						if sps.Status().Code() != ptrace.StatusCodeUnset {
+							//This.Transaction.Status = pdata.Transaction_OK.Enum()
+						}
+					}
+
+					v, b = attributes.Get(string(semconv.HTTPMethodKey))
+					if b {
+						This.Transaction.MethodName = extensionlinux.StringPtr(v.AsString())
+					}
+
+					v, b = attributes.Get(string(semconv.HTTPUserAgentKey))
+					if b {
+						This.Transaction.UserAgent = extensionlinux.StringPtr(v.AsString())
+
+						ua := This.Rawdata.GetUserAgent()
+						if ua == nil {
+							userAgentDictionary := &pdata.Dictionary{}
+							userAgentDictionary.Reset()
+							This.Rawdata.UserAgent = userAgentDictionary
+							ua = userAgentDictionary
+						}
+						/* userAgentDictionary
+						array = (1) [Array(0)]
+						arrayIndexOffset_ = -1
+						convertedPrimitiveFields_ = {}
+						messageId_ = undefined
+						pivot_ = 1.7976931348623157e+308
+						wrappers_ = null
+						[[Prototype]] = jspb.Message
+
+						OU
+
+						0 = (1) [Array(2)]
+						0 = (2) ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWe…HTML, like Gecko) Chrome/135.0.0.0 Safari/537.36', 0]
+						0 = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36'
+						1 = 0
+						*/
+						if ua != nil {
+							r := extensionlinux.Map(ua.GetDictionary(), func(e *pdata.Dictionary_DictionaryEntry) string {
+								return *e.Name
+							})
+							// TRADUCION A VERIFIER : ua.array[0].map(e => e[0]) !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+							//	if (!ua.array[0].map(e => e[0]).includes(attributes[SemanticAttributes.HTTP_USER_AGENT])) {
+							if !slices.Contains(r, v.AsString()) {
+								id := len(ua.GetDictionary()) //
+								aEntry := &pdata.Dictionary_DictionaryEntry{}
+								aEntry.Reset()
+								aEntry.Name = extensionlinux.StringPtr(v.AsString())
+								aEntry.Id = extensionlinux.NumberPtr(int32(id))
+								ua.Dictionary = append(ua.GetDictionary(), aEntry)
+
+								This.Transaction.UseragentID = extensionlinux.NumberPtr(int32(id)) // Correspond au navigateur
+							} else {
+								//dua := ua.array[0].find(e => e[0] == attributes[SemanticAttributes.HTTP_USER_AGENT]);
+								dua, _ := extensionlinux.Find(ua.GetDictionary(), func(e *pdata.Dictionary_DictionaryEntry) bool {
+									return e.GetName() == v.AsString()
+								})
+								This.Transaction.UseragentID = extensionlinux.NumberPtr(dua.GetId()) //dua[1]
+							}
+						}
+					}
+
+					// this.transaction.setErrorsList();
+					// this.transaction.setDbcnxcount();
+					// this.transaction.setDbcnxavg();
+					// this.transaction.setDbcnxmin();
+					// this.transaction.setDbcnxmax();
+					// this.transaction.setDbquerycount();
+					// this.transaction.setDbqueryavg();
+					// this.transaction.setDbquerymin();
+					// this.transaction.setDbquerymax();
+					// this.transaction.setDbfetchcount();
+					// this.transaction.setSqlrequestsList();
+					// this.transaction.setDbcommitcount();
+					// this.transaction.setDbcommitavg();
+					// this.transaction.setDbcommitmin();
+					// this.transaction.setDbcommitmax();
+					// this.transaction.setDbrollbackcount();
+					// this.transaction.setDbrollbackavg();
+
+					// let sa = new proto.org.nudge.buffer.SessionActivity();
+
+					//v, b = attributes.Get(string(semconv.HTTPRouteKey))
+					//if b && sps.Name() == v.AsString() {
+					// La fin d'un span et lorsque la parentSpanId == undefined
+					/* debut d'un appel de service : exemple -
+					"http.route": "/free",
+					"express.name": "/free",
+					"express.type": "request_handler",
+					UUID: "6d8c4362-d092-43f5-b1c8-c75cf6e39b4d",
+					*/
+					/* fin d'un appel de service KOA : exemple -
+					"http.route": "/koa_reqhttp",
+					"koa.name": "/koa_reqhttp",
+					"koa.type": "router",
+					UUID: "6d8c4362-d092-43f5-b1c8-c75cf6e39b4d",
+					*/
+					//}
+
+					if SERVEUR != nil {
+						if This.Transaction.TAG.Serveur == nil {
+							This.Transaction.TAG.Serveur = newServer()
+
+							name, _ := attributes.Get(*SERVEUR + ".name")
+							This.Transaction.TAG.Serveur.Name = name.AsString()
+							type_, _ := attributes.Get(*SERVEUR + ".type")
+							This.Transaction.TAG.Serveur.Type = type_.AsString()
+							This.Transaction.TAG.Serveur.Nom = *SERVEUR
+						}
+
+						if This.Transaction.TxType == nil {
+							This.Transaction.TxType = extensionlinux.StringPtr(extensionlinux.ToUpperCase1(*SERVEUR))
+						}
+
+						if This.Transaction.TAG.Serveur.Instrument == "" {
+							This.Transaction.TAG.Serveur.Instrument = *INSTRUMENT
+						}
+					}
+
+					if This.Parent.WaitEndService {
+						// Marquée pour attendre la fin puis être envoyé dans le rawdata si pas de parentSpanId
+						if sps.ParentSpanID().IsEmpty() {
+							This.Transaction.TAG.Urlid = Urlid_NOWAITANDSEND
+						}
+					} else { // Marquée pour ne pas attendre la fin puis être envoyé dans le rawdata
+						This.Transaction.TAG.Urlid = Urlid_NOWAITANDSEND
+					}
+
+					/*
+						if This.Transaction.TxType == nil && INSTRUMENT != nil {
+							This.Transaction.TxType = extensionlinux.StringPtr(extensionlinux.ToUpperCase1(*INSTRUMENT))
+							// Evite un ecrasement
+							if This.Transaction.TAG.Serveur == nil {
+								This.Transaction.TAG.Serveur = &Server{}
+							}
+							This.Transaction.TAG.Serveur.Instrument = *INSTRUMENT
+						}
+					*/
+
+				} else if HTTP && (sps.Kind() == ptrace.SpanKindServer || !sps.ParentSpanID().IsEmpty()) {
+					if sps.ParentSpanID().IsEmpty() {
+						v, b := attributes.Get(string(semconv.HTTPRouteKey))
+						if b {
+							This.Transaction.Code = extensionlinux.StringPtr(v.AsString())
+						}
+						// this.sendTransaction();
+						// La transaction est marquée pour etre envoyée dans le rawdata
+						This.Transaction.TAG.Urlid = Urlid_NOWAITANDSEND
+					}
+
+					urlX := ""
+					v, b := attributes.Get(string(semconv.NetPeerNameKey))
+					v2, b2 := attributes.Get(string(semconv.NetPeerIPKey))
+					v3, b3 := attributes.Get(string(semconv.NetPeerPortKey))
+					if b {
+						urlX = v.AsString()
+						if b3 {
+							urlX += ":" + v3.AsString()
+						}
+					} else if b2 {
+						urlX = v2.AsString()
+						if b3 {
+							urlX += ":" + v3.AsString()
+						}
+					}
+
+					// Étape 1 : Split sur `://`
+					parts := strings.SplitN(urlX, "://", 2)
+					// Étape 2 : Split sur `:` ou `/` (regex)
+					re := regexp.MustCompile(`[:\/]`)
+					urlXs := re.Split(parts[0], 2)
+					urlXs = urlXs
+
+					layerType := LAYER_TYPE_HTTP
+
+					layerHTTP, i := extensionlinux.Find(This.Transaction.GetLayers(), func(l *pdata.Layer) bool {
+						return l.GetLayerName() == layerType
+					})
+					if i < 0 {
+						layerHTTP = &pdata.Layer{}
+						layerHTTP.Reset()
+						This.Transaction.Layers = append(This.Transaction.GetLayers(), layerHTTP)
+						layerHTTP.LayerName = extensionlinux.StringPtr(layerType) //  SemanticAttributes.LAYER_TYPE_HTTP);
+						layerHTTP.Count = extensionlinux.NumberPtr(int64(0))
+						layerHTTP.Errors = extensionlinux.NumberPtr(int64(0))
+					}
+
+					// Creation ou pas du UUID pour URL a utiliser dans threadInfos
+					//this.transaction.setUuid(this.urlDictionary.makeUUID(url));
+					//attributes[SemanticAttributes.UUID] = this.urlDictionary.getUUID(url);
+
+					layerDetail := &pdata.LayerDetail{}
+					layerDetail.Reset()
+					layerDetail.Count = extensionlinux.NumberPtr(layerDetail.GetCount() + 1)
+
+					v, b = attributes.Get(string(semconv.HTTPStatusCodeKey))
+					// 1 => erreur HTTP , 2 => erreur SQL
+					if sps.Status().Code() == Error_HTTP && b || v.Int() >= 400 {
+						error_ := newError()
+
+						//if (typeof attributes[SemanticAttributes.HTTP_ERROR_NAME] != 'undefined')
+						//  error.setCode(attributes[SemanticAttributes.HTTP_ERROR_NAME]);
+
+						error_.Code = extensionlinux.StringPtr(sps.Status().Code().String())
+						error_.StartTime = extensionlinux.NumberPtr(sps.StartTimestamp().AsTime().UnixMilli())
+
+						if sps.Status().Message() != "" {
+							v, _ := attributes.Get(string(semconv.HTTPURLKey))
+							if len(v.AsString()) > 30 {
+								error_.Message = extensionlinux.StringPtr(v.AsString() + "...")
+							} else {
+								error_.Message = extensionlinux.StringPtr(v.AsString() + " : " + sps.Status().Message())
+							}
+						}
+
+						v, b = attributes.Get(pdata.SemanticAttributesX["HTTP_STACKTRACE"])
+						if b {
+							r := extensionlinux.Map(v.Slice().AsRaw(), func(a any) string {
+								b, _ := a.(string)
+								return b
+							})
+							err := strings.Join(r, "\n")
+
+							re := regexp.MustCompile(`(?i)\n\s*at\s*`) // (/\n\s*at\s*+/igm,'#')
+							error_.Stacktrace = extensionlinux.StringPtr(re.ReplaceAllString(err, "#"))
+							re = regexp.MustCompile(`\n`)
+							error_.JvmStacktrace = extensionlinux.StringPtr(re.ReplaceAllString(err, "\r\n\t")) //(se.stack.replace(/\n/gm,'\r\n\t'));
+						}
+
+						This.Transaction.Status = pdata.Transaction_KO.Enum()
+						This.Transaction.ErrorsX = append(This.Transaction.GetErrors(), error_)
+						layerDetail.Errors = extensionlinux.NumberPtr(layerDetail.GetErrors() + 1)
+						layerHTTP.Errors = extensionlinux.NumberPtr(layerHTTP.GetErrors() + 1)
+					} else {
+						//This.Transaction.Status = pdata.Transaction_OK.Enum()
+						layerDetail.Errors = extensionlinux.NumberPtr(int64(0))
+					}
+
+					v, b = attributes.Get(string(semconv.HTTPURLKey))
+					if b {
+						layerDetail.Code = extensionlinux.StringPtr(v.AsString())
+					}
+
+					layerDetail.Timestamp = extensionlinux.NumberPtr(sps.StartTimestamp().AsTime().UnixMilli())
+					time := sps.EndTimestamp().AsTime().UnixMilli() - sps.StartTimestamp().AsTime().UnixMilli()
+					layerDetail.Time = extensionlinux.NumberPtr(time)
+
+					InsertExtCode(string(semconv.HTTPTargetKey), string(semconv.HTTPTargetKey), attributes, layerDetail)
+					InsertExtCode(pdata.SemanticAttributesX["HTTP_STATUS_TEXT"], pdata.SemanticAttributesX["HTTP_STATUS_TEXT"], attributes, layerDetail)
+					InsertExtCode(string(semconv.HTTPFlavorKey), string(semconv.HTTPFlavorKey), attributes, layerDetail)
+					InsertExtCode(string(semconv.HTTPMethodKey), string(semconv.HTTPMethodKey), attributes, layerDetail)
+					InsertExtCode(string(semconv.NetPeerNameKey), string(semconv.NetPeerNameKey), attributes, layerDetail)
+					InsertExtCode(string(semconv.NetPeerPortKey), string(semconv.NetPeerPortKey), attributes, layerDetail)
+
+					This.AddAllExtendedcodesLayerDetails(sps, &layerDetail.ExtCodes)
+
+					layerHTTP.Calls = append(layerHTTP.GetCalls(), layerDetail)
+					layerHTTP.Count = extensionlinux.NumberPtr(layerHTTP.GetCount() + layerDetail.GetCount())
+					layerHTTP.Time = extensionlinux.NumberPtr(layerHTTP.GetTime() + layerDetail.GetTime())
+					layerHTTP.Max = extensionlinux.NumberPtr(slices.Max([]int64{layerHTTP.GetMax(), layerDetail.GetTime()}))
+					layerHTTP.Min = extensionlinux.NumberPtr(slices.Min([]int64{layerHTTP.GetMin(), layerDetail.GetTime()}))
+
+				} else if DB || GQL {
+					if sps.ParentSpanID().IsEmpty() {
+						This.Transaction.Code = extensionlinux.StringPtr(sps.Name())
+						// this.sendTransaction();
+						// La transaction est marquée pour etre envoyée dans le rawdata
+						This.Transaction.TAG.Urlid = Urlid_NOWAITANDSEND
+					}
+
+					layerType := LAYER_TYPE_SQL
+
+					layerSQL, i := extensionlinux.Find(This.Transaction.GetLayers(), func(l *pdata.Layer) bool {
+						return l.GetLayerName() == layerType
+					})
+					if i < 0 {
+						layerSQL = &pdata.Layer{}
+						layerSQL.Reset()
+						This.Transaction.Layers = append(This.Transaction.GetLayers(), layerSQL)
+						layerSQL.LayerName = extensionlinux.StringPtr(layerType) //  SemanticAttributes.LAYER_TYPE_HTTP);
+						layerSQL.Count = extensionlinux.NumberPtr(int64(0))
+						layerSQL.Errors = extensionlinux.NumberPtr(int64(0))
+					}
+
+					//let url = getUrl(attributes);
+					//this.transaction.setUrl(url);
+					// Creation ou pas du UUID pour URL a utiliser dans threadInfos
+					//this.transaction.setUuid(this.urlDictionary.makeUUID(url));
+					//attributes[SemanticAttributes.UUID] = this.urlDictionary.getUUID(url);
+
+					layerDetail := &pdata.LayerDetail{}
+					layerDetail.Reset()
+					layerDetail.Count = extensionlinux.NumberPtr(layerDetail.GetCount() + 1)
+
+					// 1 => erreur HTTP , 2 => erreur SQL
+					if sps.Status().Code() == Error_SQL {
+						error_ := newError()
+						//error.setServerid();
+
+						//if (typeof attributes[SemanticAttributes.HTTP_ERROR_NAME] != 'undefined')
+						//  error.setCode(attributes[SemanticAttributes.HTTP_ERROR_NAME]);
+						v, b := attributes.Get(string(semconv.DBSystemKey))
+						if b {
+							error_.Code = extensionlinux.StringPtr("SQL - " + v.AsString())
+						}
+
+						error_.StartTime = extensionlinux.NumberPtr(sps.StartTimestamp().AsTime().UnixMilli())
+
+						if sps.Status().Message() == "" {
+							v, _ := attributes.Get(string(semconv.DBStatementKey))
+							if len(v.AsString()) > 40 {
+								error_.Message = extensionlinux.StringPtr(v.AsString()[:40] + "...")
+							} else {
+								error_.Message = extensionlinux.StringPtr(v.AsString() + " : " + sps.Status().Message())
+							}
+						}
+
+						v, b = attributes.Get(pdata.SemanticAttributesX["HTTP_STACKTRACE"])
+						if b {
+							r := extensionlinux.Map(v.Slice().AsRaw(), func(a any) string {
+								b, _ := a.(string)
+								return b
+							})
+							err := strings.Join(r, "\n")
+
+							re := regexp.MustCompile(`(?i)\n\s*at\s*`) // (/\n\s*at\s*+/igm,'#')
+							error_.Stacktrace = extensionlinux.StringPtr(re.ReplaceAllString(err, "#"))
+							re = regexp.MustCompile(`\n`)
+							error_.JvmStacktrace = extensionlinux.StringPtr(re.ReplaceAllString(err, "\r\n\t")) //(se.stack.replace(/\n/gm,'\r\n\t'));
+						}
+
+						This.Transaction.Status = pdata.Transaction_KO.Enum()
+						This.Transaction.ErrorsX = append(This.Transaction.GetErrors(), error_)
+						layerDetail.Errors = extensionlinux.NumberPtr(layerDetail.GetErrors() + 1)
+						layerSQL.Errors = extensionlinux.NumberPtr(layerSQL.GetErrors() + 1)
+					} else {
+						//This.Transaction.Status = pdata.Transaction_OK.Enum()
+						layerDetail.Errors = extensionlinux.NumberPtr(layerDetail.GetErrors())
+					}
+
+					v, b := attributes.Get(string(semconv.DBStatementKey))
+					if b {
+						layerDetail.Code = extensionlinux.StringPtr(v.AsString())
+					}
+
+					layerDetail.Timestamp = extensionlinux.NumberPtr(sps.StartTimestamp().AsTime().UnixMilli())
+					time := sps.EndTimestamp().AsTime().UnixMilli() - sps.StartTimestamp().AsTime().UnixMilli()
+					layerDetail.Time = extensionlinux.NumberPtr(time)
+
+					// layerDetail.setValuesList();
+					/*
+						  var serverJDBC = attributes[SemanticAttributes.DB_CONNECTION_STRING].matchAll(/^jdbc:([^:]+):.*$/g);
+						  serverJDBC = serverJDBC.next();
+						  serverJDBC = serverJDBC && Array.isArray(serverJDBC.value) && serverJDBC.value.length >= 2 ? serverJDBC.value[1] : undefined;
+
+						  resource: {
+							_attributes: {
+							  "service.name": "unknown_service:node",
+							  "telemetry.sdk.language": "nodejs",
+							  "telemetry.sdk.name": "opentelemetry",
+							  "telemetry.sdk.version": "1.11.0",
+							},
+							asyncAttributesPending: false,
+							_syncAttributes: {
+							  "service.name": "unknown_service:node",
+							  "telemetry.sdk.language": "nodejs",
+							  "telemetry.sdk.name": "opentelemetry",
+							  "telemetry.sdk.version": "1.11.0",
+							},
+							_asyncAttributesPromise: undefined,
+						  }
+					*/
+					/* MySQL :
+					  "db.system": "mysql",
+					  "net.peer.name": "localhost",
+					  "net.peer.port": 3306,
+					  "db.connection_string": "jdbc:mysql://localhost:3306/atakama",
+					  "db.name": "atakama",
+					  "db.user": "root",
+					  "db.statement": "SELECT * FROM licences limit 2",
+
+					  MongoDB :
+					  "db.system": "mongodb",
+					  "db.name": "admin",
+					  "db.mongodb.collection": "$cmd",
+					  "net.host.name": "localhost",
+					  "net.host.port": "27017",
+					  "db.statement": "{\"listDatabases\":\"?\"}",
+
+					  Sqlite3 :
+					  {
+						"db.system": "sqlite3",
+						"db.statement": "SELECT * FROM Personne limit 2",
+						"db.name": "C:\\Users\\frederic1\\Documents\\DEVELOPPEMENT NUDGE\\NUDGE\\ApplicationCliente\\personnes.db",
+					  }
+
+					  sqlite:
+					  {
+						"knex.version": "2.4.2",
+						"db.system": "sqlite",
+						"db.name": "C:\\Users\\frederic1\\Documents\\DEVELOPPEMENT NUDGE\\NUDGE\\Ghost\\versions\\5.65.0\\content\\data\\ghost-dev.db",
+						"db.statement": "select * from sqlite_master where type = 'table' and name = ?",
+					  }
+					*/
+
+					if INSTRUMENT != nil {
+						switch *INSTRUMENT {
+						case "Graphql":
+							// ATTR_GRAPHQL_OPERATION_NAME
+							_, b = attributes.Get("graphql.operation.type")
+							if b {
+								InsertExtCode("graphql.operation.type", "jdbc.name", attributes, layerDetail)
+
+								connection_string := "jdbc:" + strings.ToLower(*INSTRUMENT) + "://"
+								keyValue := &pdata.KeyValue{}
+								keyValue.Reset()
+								keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+								keyValue.Value = extensionlinux.StringPtr(connection_string)
+								layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+
+								InsertExtCode("graphql.source", string(semconv.DBStatementKey), attributes, layerDetail)
+								InsertExtCode("graphql.operation.type", "jdbc.product.user", attributes, layerDetail)
+							} else {
+								keyValue, _ := InsertExtCode("graphql.source", string(semconv.DBSystemKey), attributes, layerDetail)
+								keyValue.Value = extensionlinux.StringPtr(strings.ToLower(*INSTRUMENT))
+
+								//InsertExtCode("graphql.source", string(semconv.DBStatementKey), attributes, layerDetail)
+							}
+
+							layerSQL.Calls = append(layerSQL.GetCalls(), layerDetail)
+
+						default:
+							v, b = attributes.Get(string(semconv.DBConnectionStringKey))
+							if b {
+								keyValue := &pdata.KeyValue{}
+								keyValue.Reset()
+								keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+								connection_string := v.AsString()
+								if This.Parent.SendUserConnectionString {
+									v2, b2 := attributes.Get(string(semconv.DBUserKey))
+									var r string
+									if b2 {
+										r = "://" + v2.AsString() + "@"
+									} else {
+										r = "://"
+									}
+
+									connection_string = strings.Replace(connection_string, "://", r, 1)
+								}
+
+								keyValue.Value = extensionlinux.StringPtr(connection_string)
+								layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+								//layerDetail.addExtendedcodes(keyValue);
+							} else if v, b := attributes.Get(string(semconv.DBMongoDBCollectionKey)); b { // moteur MongoDB
+								v2, _ := attributes.Get(string(semconv.DBSystemKey))
+								v3, _ := attributes.Get(string(semconv.NetPeerNameKey))
+								v4, _ := attributes.Get(string(semconv.NetPeerPortKey))
+
+								// `${attributes[SemanticAttributes.DB_SYSTEM]}://${attributes[SemanticAttributes.NET_HOST_NAME]}:${attributes[SemanticAttributes.NET_HOST_PORT]}/${attributes[SemanticAttributes.DB_MONGODB_COLLECTION]}`;
+								connection_string := fmt.Sprintf("%v://%v:%v/%v", v2.Str(), v3.Str(), v4.Int(), v.Str())
+
+								if This.Parent.SendUserConnectionString {
+									v2, b2 := attributes.Get(string(semconv.DBNameKey))
+									var r string
+									if b2 && len(v2.AsString()) > 0 {
+										r = "://" + v2.AsString() + "@"
+									} else {
+										r = "://"
+									}
+
+									connection_string = strings.Replace(connection_string, "://", r, 1)
+								}
+
+								keyValue := &pdata.KeyValue{}
+								keyValue.Reset()
+								keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+								keyValue.Value = extensionlinux.StringPtr(connection_string)
+								layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+								//layerDetail.addExtendedcodes(keyValue);
+							} else
+							// moteur DBB importés : Sqlite3...
+							if v, b = attributes.Get(string(semconv.DBSystemKey)); b {
+								switch strings.ToLower(v.AsString()) {
+								case "sqlite":
+									fallthrough
+								case "sqlite3":
+									v2, _ := attributes.Get(string(semconv.DBNameKey))
+									connection_string := fmt.Sprintf("%v///%v", v.AsString(), v2.Str())
+									if This.Parent.SendUserConnectionString {
+										v3, b3 := attributes.Get(string(semconv.DBUserKey))
+										var r string
+										if b3 && len(v3.AsString()) > 0 {
+											r = "://" + v3.AsString() + "@"
+										} else {
+											r = "://"
+										}
+										connection_string = strings.Replace(connection_string, "://", r, 1)
+									}
+
+									keyValue := &pdata.KeyValue{}
+									keyValue.Reset()
+									keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+									keyValue.Value = extensionlinux.StringPtr(connection_string)
+									layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+									//layerDetail.addExtendedcodes(keyValue);
+
+								case "cassandra":
+									v2, _ := attributes.Get(string(semconv.DBSystemKey))
+									v3, _ := attributes.Get(string(semconv.NetPeerNameKey))
+									v4, _ := attributes.Get(string(semconv.NetPeerPortKey))
+									v5, _ := attributes.Get(string(semconv.DBNameKey))
+
+									// `${attributes[SemanticAttributes.DB_SYSTEM]}://${attributes[SemanticAttributes.NET_PEER_NAME]}${attributes[SemanticAttributes.NET_PEER_PORT] != undefined ? ':':''}${attributes[SemanticAttributes.NET_PEER_PORT]}/${attributes[SemanticAttributes.DB_NAME]}`;
+									connection_string := fmt.Sprintf("%v://%v:%v/%v", v2.Str(), v3.Str(), v4.Int(), v5.Str())
+									if This.Parent.SendUserConnectionString {
+										v3, b3 := attributes.Get(string(semconv.DBUserKey))
+										var r string
+										if b3 && len(v3.AsString()) > 0 {
+											r = "://" + v3.AsString() + "@"
+										} else {
+											r = "://"
+										}
+										connection_string = strings.Replace(connection_string, "://", r, 1)
+									}
+
+									keyValue := &pdata.KeyValue{}
+									keyValue.Reset()
+									keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+									keyValue.Value = extensionlinux.StringPtr(connection_string)
+									layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+									//layerDetail.addExtendedcodes(keyValue);
+
+								default:
+									v2, _ := attributes.Get(string(semconv.DBSystemKey))
+									v3, _ := attributes.Get(string(semconv.NetPeerNameKey))
+									v4, _ := attributes.Get(string(semconv.NetPeerPortKey))
+									v5, _ := attributes.Get(string(semconv.DBNameKey))
+
+									// `${attributes[SemanticAttributes.DB_SYSTEM]}://${attributes[SemanticAttributes.NET_PEER_NAME]}${attributes[SemanticAttributes.NET_PEER_PORT] != undefined ? ':':''}${attributes[SemanticAttributes.NET_PEER_PORT]}/${attributes[SemanticAttributes.DB_NAME]}`;
+									connection_string := fmt.Sprintf("%v://%v:%v/%v", v2.Str(), v3.Str(), v4.Str(), v5.Str())
+									if This.Parent.SendUserConnectionString {
+										v3, b3 := attributes.Get(string(semconv.DBUserKey))
+										var r string
+										if b3 && len(v3.AsString()) > 0 {
+											r = "://" + v3.AsString() + "@"
+										} else {
+											r = "://"
+										}
+										connection_string = strings.Replace(connection_string, "://", r, 1)
+									}
+
+									keyValue := &pdata.KeyValue{}
+									keyValue.Reset()
+									keyValue.Key = extensionlinux.StringPtr("jdbc.url")
+									keyValue.Value = extensionlinux.StringPtr(connection_string)
+									layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+									//layerDetail.addExtendedcodes(keyValue);
+								}
+							}
+
+							InsertExtCode(string(semconv.DBNameKey), "jdbc.name", attributes, layerDetail)
+							InsertExtCode(string(semconv.DBSystemKey), "jdbc.system", attributes, layerDetail)
+							InsertExtCode(string(semconv.DBUserKey), "jdbc.product.user", attributes, layerDetail)
+							/*
+								SA := []string{string(semconv.NetPeerNameKey), string(semconv.NetPeerPortKey), string(semconv.NetHostNameKey),
+									string(semconv.NetHostPortKey),
+								}*/
+							SAN := []string{string(semconv.DBUserKey), string(semconv.DBSystemKey), string(semconv.DBNameKey), string(semconv.DBMongoDBCollectionKey),
+								string(semconv.DBConnectionStringKey), string(semconv.DBStatementKey), pdata.SemanticAttributesX["HTTP_STACKTRACE"], LAYER_TYPE_SQL,
+							}
+							attributes.Range(func(k string, attribute pcommon.Value) bool {
+								if !slices.Contains(SAN, k) {
+									InsertExtCode(k, k, attributes, layerDetail)
+									//layerDetail.addExtendedcodes(keyValue);
+								}
+								return true
+							})
+
+							// layerDetail.setExtendedcodesList();
+							// layerDetail.addExtendedcodes();
+							// layerDetail.setExtcodesList();
+							// layerDetail.setCorrelationidsList();
+							// layerSQL.setCallsList(layerDetail);
+
+						} // Fin du Switch INSTRUMENT
+					} else {
+					}
+
+					layerSQL.Calls = append(layerSQL.GetCalls(), layerDetail)
+					layerSQL.Count = extensionlinux.NumberPtr(layerSQL.GetCount() + layerDetail.GetCount())
+					layerSQL.Time = extensionlinux.NumberPtr(layerSQL.GetTime() + layerDetail.GetTime())
+					layerSQL.Max = extensionlinux.NumberPtr(slices.Max([]int64{layerSQL.GetMax(), layerDetail.GetTime()}))
+					layerSQL.Min = extensionlinux.NumberPtr(slices.Min([]int64{layerSQL.GetMin(), layerDetail.GetTime()}))
+
+					/*
+						var sqlRequest = new proto.org.nudge.buffer.SqlRequest();
+
+						if (typeof attributes[SemanticAttributes.DB_STATEMENT] != 'undefined')
+						  sqlRequest.setSql(attributes[SemanticAttributes.DB_STATEMENT]);
+
+						sqlRequest.setStarttime( getTimestamp(sps['startTime']) );
+						sqlRequest.setEndtime( getTimestamp(sps['endTime']) );
+
+						if (typeof attributes[SemanticAttributes.DB_CONNECTION_STRING] != 'undefined')
+						  sqlRequest.setServerurl(attributes[SemanticAttributes.DB_CONNECTION_STRING]);
+
+						// sqlRequest.setCount();
+						// sqlRequest.setQueryavg();
+						// sqlRequest.setQuerymin();
+						// sqlRequest.setQuerymax();
+						// sqlRequest.setServerurl();
+						// sqlRequest.setFetchcount();
+						// sqlRequest.setFetchavg();
+						// sqlRequest.setFetchmin();
+						// sqlRequest.setFetchmax();
+						// sqlRequest.setUrlid();
+						// sqlRequest.setRequuid();
+						// sqlRequest.setRequesttype();
+						// sqlRequest.setParametersList();
+
+						this.transaction.addSqlrequests(sqlRequest);
+					*/
+				} // fin de if DB || GQL
+			} // boucle 3
+		} // boucle 2
+	} // boucle 1
+
+	/* Partie Profiling INUTILE ICI
+	if (global.configurationAgentNodeJS?.Console?.logDetail2 === true)
+	{
+	  let functionPointEntreeTimeLineNode = getLast(functionPointEntreeTimeLineNodes);
+	  let T = functionPointEntreeTimeLineNodes.reduce((a, e) => a + e.N, 0);
+	  let s = '[' + functionPointEntreeTimeLineNodes.reduce((a, e, i) => {
+		return a + `${e.N}(${e.M})[${functionPointEntreeTimeLineNode.I - e.I}]${i+1 < functionPointEntreeTimeLineNodes.length ? ',':''}`;
+	  }, "") + ']';
+	  MyConsole.log(`going to flush rawdata -> global.inspector.profile.cmpt / functionPointEntreeTimeLineNodes -> ${global.inspector.profile.cmpt} / ${T} ${s}} : (${global.inspector.profile.cmpt == T ? "OK" : "KO"})`);
+	}
+
+	global.inspector.profile.cmpt = 0
+	*/
+
+} // FIn de la fonction
+
+func InsertExtCode(key string, keyX string, attr pcommon.Map, layerDetail *pdata.LayerDetail) (*pdata.KeyValue, bool) {
+	var keyValue *pdata.KeyValue
+	v, b := attr.Get(key)
+	if b {
+		keyValue, _ = extensionlinux.Find(layerDetail.GetExtCodes(), func(e *pdata.KeyValue) bool {
+			return e.GetKey() == keyX
+		})
+		if keyValue != nil {
+			//keyValue.Key = extensionlinux.StringPtr(keyX)
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+		} else {
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr(keyX)
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+			layerDetail.ExtCodes = append(layerDetail.GetExtCodes(), keyValue)
+		}
+	}
+
+	return keyValue, b
+}
+
+func (transaction *TransactionNudge) InsertExtendedCode(key string, keyX string, attr pcommon.Map) (*pdata.KeyValue, bool) {
+	var keyValue *pdata.KeyValue
+	v, b := attr.Get(key)
+	if b {
+		keyValue, _ = extensionlinux.Find(transaction.GetExtendedCodes(), func(e *pdata.KeyValue) bool {
+			return e.GetKey() == keyX
+		})
+		if keyValue != nil {
+			//keyValue.Key = extensionlinux.StringPtr(keyX)
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+		} else {
+			keyValue = &pdata.KeyValue{}
+			keyValue.Reset()
+			keyValue.Key = extensionlinux.StringPtr(keyX)
+			keyValue.Value = extensionlinux.StringPtr(v.AsString())
+			transaction.ExtendedCodes = append(transaction.GetExtendedCodes(), keyValue)
+		}
+	}
+
+	return keyValue, b
 }
 
 /*
@@ -200,6 +1790,7 @@ ExplicitBounds =
 Exemplars =
 []v1.Exemplar len: 0, cap: 0, nil
 */
+
 func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
 
 	// Creation du This.Rawdata
@@ -225,6 +1816,10 @@ func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) erro
 		return consumererror.NewPermanent(err)
 	}
 	return e.export(ctx, e.metricsURL, request, e.metricsPartialSuccessHandler)
+}
+
+func (This *NudgeExporter) MetricsExportRequest2Rawdata(tr *pmetricnudge.ExportRequest) {
+	//metrics := tr.Metrics()
 }
 
 func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
@@ -255,6 +1850,10 @@ func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
 	return e.export(ctx, e.logsURL, request, e.logsPartialSuccessHandler)
 }
 
+func (This *NudgeExporter) LogsExportRequest2Rawdata(tr *plognudge.ExportRequest) {
+	//metrics := tr.Metrics()
+}
+
 func (e *baseExporter) pushProfiles(ctx context.Context, td pprofile.Profiles) error {
 
 	// Creation du This.Rawdata
@@ -283,14 +1882,18 @@ func (e *baseExporter) pushProfiles(ctx context.Context, td pprofile.Profiles) e
 	return e.export(ctx, e.profilesURL, request, e.profilesPartialSuccessHandler)
 }
 
-func (e *baseExporter) export(ctx context.Context, url string, request []byte, partialSuccessHandler partialSuccessHandler) error {
+func (This *NudgeExporter) ProfilesExportRequest2Rawdata(tr *pprofilenudge.ExportRequest) {
 
+}
+
+func (e *baseExporter) export(ctx context.Context, url string, request []byte, partialSuccessHandler partialSuccessHandler) error {
 	// Met à nil le pointeur car flush des rawdata
 	e.nudgeExporter.Rawdata = nil
 
 	e.logger.Debug("Preparing to make HTTP request", zap.String("url", url))
 
-	req, err := http.NewRequestWithContext(ctx, e.config.NudgeHTTPClientConfig.Method, url, bytes.NewReader(request))
+	br := bytes.NewReader(request)
+	req, err := http.NewRequestWithContext(ctx, e.config.NudgeHTTPClientConfig.Method, url, br)
 	if err != nil {
 		return consumererror.NewPermanent(err)
 	}
@@ -317,8 +1920,8 @@ func (e *baseExporter) export(ctx context.Context, url string, request []byte, p
 		resp.Body.Close()
 	}()
 
-	if e.config.NudgeHTTPClientConfig.Log {
-		e.logger.Info("Send http", zap.String("url", "/"+e.config.NudgeHTTPClientConfig.Method+" "+url), zap.Int64("ContentLength", req.ContentLength), zap.String("StatusCode", resp.Status))
+	if e.config.NudgeHTTPClientConfig.Console.Verbosity.String() == "Detailed" {
+		e.logger.Info("Send http", zap.String("url", req.Method+" "+req.URL.Scheme+"://"+req.URL.Host+":"+req.URL.Port()+req.URL.Path), zap.Int64("ContentLength", req.ContentLength), zap.String("StatusCode", resp.Status))
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
@@ -575,16 +2178,69 @@ func (e *baseExporter) profilesPartialSuccessHandler(protoBytes []byte, contentT
 	return nil
 }
 
-type NudgeExporter struct {
-	Rawdata      *pdata.RawData
-	Cmpt         int64
-	AllDrives    map[string]interface{}
-	Agentiduuid  string
-	IndexRawdata int
-	Components   []*pdata.Component
-	Hostname     string
+type Server struct {
+	Name       string
+	Type       string
+	Nom        string
+	Instrument string
+}
 
-	Parent *Config
+func newServer() *Server {
+	return &Server{}
+}
+
+type TransactionNudge_TAG struct {
+	Correlationid uint32
+	Urlid         uint32
+	Serveur       *Server
+	Code          string
+	TraceId       string
+	ApplicationID string
+	Language      string
+	UrlAppId      *string
+}
+
+type TransactionNudge struct {
+	*pdata.Transaction
+	ErrorsX []*ErrorX
+	TAG     *TransactionNudge_TAG
+}
+
+func newTransactionNudge() *TransactionNudge {
+	t := &TransactionNudge{
+		Transaction: &pdata.Transaction{},
+		TAG: &TransactionNudge_TAG{
+			Correlationid: uint32(0),
+			Urlid:         uint32(0),
+			Serveur:       nil,
+		},
+	}
+
+	t.Transaction.Reset()
+
+	return t
+}
+func (This *TransactionNudge) GetErrors() []*ErrorX {
+	if This != nil {
+		return This.ErrorsX
+	}
+	return nil
+}
+
+type NudgeExporter struct {
+	Rawdata        *pdata.RawData
+	ThreadInfoList *pdata.ThreadInfoList
+	Cmpt           int64
+	AllDrives      map[string]any
+	Agentiduuid    string
+	IndexRawdata   int
+	Components     []*pdata.Component
+	Hostname       string
+
+	Parent       *Config
+	Transactions []*TransactionNudge
+	Transaction  *TransactionNudge
+	Dns          string
 }
 
 func newNudgeExporter(parent *Config) *NudgeExporter {
@@ -592,12 +2248,26 @@ func newNudgeExporter(parent *Config) *NudgeExporter {
 	This.Rawdata = nil
 	This.Cmpt = 0
 	This.AllDrives = map[string]interface{}{}
-	This.Agentiduuid = ""
+	This.Agentiduuid = GetUuid("CollecteurOTLP").String()
 	This.Components = make([]*pdata.Component, 0)
 	This.Hostname, _ = os.Hostname()
 	This.Parent = parent
+	This.Transactions = make([]*TransactionNudge, 0)
+	This.Transaction = newTransactionNudge()
 
 	This.InitDrives()
+
+	// Recuperer
+	ips, err := net.LookupIP("google.com")
+	if err != nil {
+		//fmt.Println("Erreur:", err)
+	} else {
+		ipsX := extensionlinux.Map(ips, func(ip net.IP) string {
+			return ip.String()
+		})
+
+		This.Dns = strings.Join(ipsX, ";")
+	}
 
 	return This
 }
@@ -609,15 +2279,29 @@ func (This *NudgeExporter) MarshalJSON() ([]byte, error) {
 
 func (This *NudgeExporter) MarshalProto() ([]byte, error) {
 	// Buffer pour stocker les données binaires
-	var buf bytes.Buffer
-
+	//var buf bytes.Buffer
 	// Création d'un encodeur GOB
-	enc := gob.NewEncoder(&buf)
-
+	//enc := gob.NewEncoder(&buf)
 	// Encodage de la structure en binaire
-	err := enc.Encode(This.Rawdata)
+	//err := enc.Encode(This.Rawdata)
 
-	return buf.Bytes(), err
+	out, err := proto.Marshal(This.Rawdata)
+	return out, err
+}
+
+func (This *NudgeExporter) Attributes2URL(cfg component.Config, attributes pcommon.Map) *string {
+	v, b := attributes.Get("nudge_application_id")
+	if b {
+		oCfg := cfg.(*Config)
+		s, err := composeSignalURL(oCfg, oCfg.TracesEndpoint, oCfg.NudgeHTTPClientConfig.PathCollect, v.AsString()) //"traces", "v1")
+		if err != nil {
+			return nil
+		}
+
+		return &s
+	}
+
+	return nil
 }
 
 func MapToString(attributes pcommon.Map) string {
@@ -633,134 +2317,6 @@ func MapToString(attributes pcommon.Map) string {
 	return s[0 : len(s)-len(" , ")]
 }
 
-func EventToString(ses ptrace.SpanEventSlice) string {
-	s := ""
-	for i := 0; i < ses.Len(); i++ {
-		se := ses.At(i)
-		s += fmt.Sprintf("{ Event #%v , TimeStamp: %v , Name: %v , Attributes: {%v} } , ", i, se.Timestamp().String(), se.Name(), MapToString(se.Attributes()))
-	}
-	if len(s) < len(" , ") {
-		return ""
-	}
-
-	return s[0 : len(s)-len(" , ")]
-}
-
-func NumberDataPointsToString(ndps pmetric.NumberDataPointSlice) string {
-	x := make([]string, 0)
-	for i := 0; i < ndps.Len(); i++ {
-		ndp := ndps.At(i)
-
-		s := ""
-		s += fmt.Sprintf("NoRecordedValue : %v", ndp.Flags().NoRecordedValue())
-		s += fmt.Sprintf("DoubleValue : %v , ", ndp.DoubleValue())
-		s += fmt.Sprintf("IntValue : %v , ", ndp.IntValue())
-		s += fmt.Sprintf("Timestamp : %v , ", ndp.Timestamp())
-		s += fmt.Sprintf("ValueType: %v , ", ndp.ValueType())
-		s += fmt.Sprintf("Attributes: {%v} , ", MapToString(ndp.Attributes()))
-
-		x = append(x, fmt.Sprintf("{ %v }", s))
-	}
-
-	return fmt.Sprintf("[ %v ]", strings.Join(x, ","))
-}
-
-func UInt64ToString(u pcommon.UInt64Slice) string {
-	s := ""
-	for i := 0; i < u.Len(); i++ {
-		s += fmt.Sprintf("%v,", u.At(i))
-	}
-	return fmt.Sprintf("[%v]", s[:len(s)-1])
-}
-
-func HistogramDataPointsToString(dps pmetric.HistogramDataPointSlice) string {
-	x := make([]string, 0)
-	for i := 0; i < dps.Len(); i++ {
-		dp := dps.At(i)
-
-		s := ""
-		s += fmt.Sprintf("NoRecordedValue : %v", dp.Flags().NoRecordedValue())
-		s += fmt.Sprintf("Count: %v , ", dp.Count())
-		s += fmt.Sprintf("Max : %v , ", dp.Max())
-		s += fmt.Sprintf("Min : %v , ", dp.Min())
-		s += fmt.Sprintf("BucketCounts : (%v)%v , ", dp.BucketCounts().Len(), UInt64ToString(dp.BucketCounts()))
-		s += fmt.Sprintf("Sum : %v , ", dp.Sum())
-		s += fmt.Sprintf("Attributes: {%v} , ", MapToString(dp.Attributes()))
-
-		x = append(x, fmt.Sprintf("{ %v }", s))
-	}
-
-	return fmt.Sprintf("[ %v ]", strings.Join(x, ","))
-}
-
-func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportRequest) {
-	traces := tr.Traces()
-	rss := traces.ResourceSpans()
-	for i := 0; i < rss.Len(); i++ {
-		rs := rss.At(i)
-		attributes := rs.Resource().Attributes()
-		fmt.Println(fmt.Sprintf("ResourceSpan #%v , Attributes: {%v}", i, MapToString(attributes)))
-		ss := rs.ScopeSpans()
-		for j := 0; j < ss.Len(); j++ {
-			s := ss.At(j)
-			scope := s.Scope()
-			fmt.Println(fmt.Sprintf("\tScopeSpan #%v , url: %v, InstrumentationScope{Name: %v , Version: %v , Attributes: {%v} }", j, s.SchemaUrl(), scope.Name(), scope.Version(), MapToString(scope.Attributes())))
-			spans := s.Spans()
-			for k := 0; k < spans.Len(); k++ {
-				span := spans.At(k)
-				fmt.Println(fmt.Sprintf("\t\tSpan #%v , Span{Event: {%v} , Name: %v , Flag: %v , Kind %v , ParentSpanID: %v , Status: {%v %v} , Attributes: {%v}", k, EventToString(span.Events()), span.Name(), span.Flags(), span.Kind().String(), span.ParentSpanID().String(), span.Status().Code(), span.Status().Message(), MapToString(span.Attributes())))
-			}
-		}
-	}
-}
-
-func (This *NudgeExporter) MetricsExportRequest2Rawdata(tr *pmetricnudge.ExportRequest) {
-	metrics := tr.Metrics()
-	rsm := metrics.ResourceMetrics()
-	for i := 0; i < rsm.Len(); i++ {
-		rm := rsm.At(i)
-		attributes := rm.Resource().Attributes()
-		drop_attributes := rm.Resource().DroppedAttributesCount()
-		fmt.Println(fmt.Sprintf("ResourceMetric #%v , Dropped: %v , Attributes: {%v}", i, drop_attributes, MapToString(attributes)))
-		sms := rm.ScopeMetrics()
-		for j := 0; j < sms.Len(); j++ {
-			sm := sms.At(j)
-			scope := sm.Scope()
-			drop_attributes := scope.DroppedAttributesCount()
-			fmt.Println(fmt.Sprintf("\tScopeMetric #%v , url: %v, InstrumentationScope{Name: %v , Version: %v , drop_attributes: %v , Attributes: {%v} }", j, sm.SchemaUrl(), scope.Name(), scope.Version(), drop_attributes, MapToString(scope.Attributes())))
-			ms := sm.Metrics()
-			for k := 0; k < ms.Len(); k++ {
-				m := ms.At(k)
-				eh := m.Histogram()
-				//g := m.Gauge()
-				eh_ := HistogramDataPointsToString(eh.DataPoints())
-				//g_ := NumberDataPointsToString(g.DataPoints())
-				fmt.Println(fmt.Sprintf("\t\tMetric #%v , Metric{Name: %v , Unit: %v , Type: %v , Description: %v , ExponentialHistogram: %v , Metadata: {%v}", k, m.Name(), m.Unit(), m.Type(), m.Description(), eh_, MapToString(m.Metadata())))
-			}
-		}
-	}
-}
-
-func (This *NudgeExporter) LogsExportRequest2Rawdata(tr *plognudge.ExportRequest) {
-	logs := tr.Logs()
-	rss := logs.ResourceLogs()
-	for i := 0; i < rss.Len(); i++ {
-		rs := rss.At(i)
-		attributes := rs.Resource().Attributes()
-		fmt.Println(MapToString(attributes))
-	}
-}
-
-func (This *NudgeExporter) ProfilesExportRequest2Rawdata(tr *pprofilenudge.ExportRequest) {
-	profiles := tr.Profiles()
-	rss := profiles.ResourceProfiles()
-	for i := 0; i < rss.Len(); i++ {
-		rs := rss.At(i)
-		attributes := rs.Resource().Attributes()
-		fmt.Println(MapToString(attributes))
-	}
-}
-
 func (This *NudgeExporter) InitDrives() error {
 	if This != nil {
 		drives, err := mySystem.GetPhysicalDrives()
@@ -774,6 +2330,96 @@ func (This *NudgeExporter) InitDrives() error {
 	}
 
 	return nil
+}
+
+/**
+* Urilid = 0 supprime du tableau des transactions et envoie dans le rawdata
+* Urilid = 2 supprime du tableau des transactions mais n'envoie pas dans le rawdata
+* Urilid = 1 garde dans le tableau des transactions jusqu'au timeout puis envoie dans le rawdata
+ */
+func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string) {
+	m := len(This.Rawdata.Transactions)
+	n := 0
+	k := len(This.Transactions)
+	languages := make([]string, 0)
+	var urlAppId *string = nil
+	for i := 0; i < len(This.Transactions); i++ {
+		t := This.Transactions[i]
+
+		if app_id == "" || t.TAG.ApplicationID == app_id {
+
+			for _, e := range t.GetErrors() {
+				p := e.ToError()
+				t.Errors = append(t.Errors, p)
+			}
+
+			if slices.Contains([]uint32{0, 2}, t.TAG.Urlid) {
+				if slices.Contains([]uint32{0}, t.TAG.Urlid) {
+					This.Rawdata.Transactions = append(This.Rawdata.Transactions, t.Transaction)
+					languages = extensionlinux.AppendUnique(languages, t.TAG.Language)
+					if app_id != "" && urlAppId == nil {
+						urlAppId = t.TAG.UrlAppId
+					}
+				}
+
+				This.Transactions = extensionlinux.Splice(This.Transactions, i, 1) //.splice(i, 1);
+				i--
+			} else if slices.Contains([]uint32{1}, t.TAG.Urlid) {
+				st := t.GetStartTime()
+				st = (time.Now().UnixMilli() - st) / 1000
+				if st > 0 && st > This.Parent.TimeoutBufferTransaction {
+					if This.Parent.Console.Verbosity.String() == "Detailed" {
+						fmt.Println(fmt.Printf("Transaction non terminée(s), TIMEOUT %vs , language:%v , app_id:%v , %v", This.Parent.TimeoutBufferTransaction, t.TAG.Language, t.TAG.ApplicationID, t.GetCode()))
+					}
+
+					This.Rawdata.Transactions = append(This.Rawdata.Transactions, t.Transaction)
+					languages = extensionlinux.AppendUnique(languages, t.TAG.Language)
+					if app_id != "" && urlAppId == nil {
+						urlAppId = t.TAG.UrlAppId
+					}
+					This.Transactions = extensionlinux.Splice(This.Transactions, i, 1)
+					i--
+					n++
+				}
+			}
+		}
+	}
+
+	if This.Parent.Console.Verbosity.String() == "Detailed" {
+		fmt.Println(fmt.Sprintf("Ajout de %v/%v transactions, Nombre de transaction(s) non terminée(s) : %v", len(This.Rawdata.Transactions)-m, k, n))
+	}
+
+	This.Transaction = nil
+
+	return languages, urlAppId
+}
+
+func BuildPathCollect(dateStr string, filenameN int) string {
+	// "./collectes/collecte_2025-04-10_file123.dat"
+	relativePath := fmt.Sprintf("./collectes/collecte_%v_%v.dat", dateStr, filenameN)
+
+	// Résout le chemin absolu
+	absPath, err := filepath.Abs(relativePath)
+	if err != nil {
+		// En cas d'erreur, retourne le chemin relatif
+		return relativePath
+	}
+
+	return absPath
+}
+
+func (This *NudgeExporter) FlushRawdataToFileDisk(request []byte) {
+	dateStr := "X" // `${String(d.getFullYear()).padStart(4,'0')}_${String(d.getMonth()+1).padStart(2,'0')}_${String(d.getDate()).padStart(2,'0')}__${String(d.getHours()).padStart(2,'0')}_${String(d.getMinutes()).padStart(2,'0')}_${String(d.getSeconds()).padStart(2,'0')}`;
+	//filename := path.resolve(__dirname, `./collectes/collecte_${dateStr}_${filename_N}.dat`);
+
+	filename := BuildPathCollect(dateStr, filename_N)
+	err := os.WriteFile(filename, request, 0644)
+	if err != nil {
+		fmt.Println(fmt.Sprintf("Erreur lors de l'écriture du fichier : %v : %v", filename, err))
+	} else {
+		fmt.Println(fmt.Sprintf("Rawdata envoyé dans le fichier : %v", filename))
+	}
+	filename_N++
 }
 
 func (This *NudgeExporter) CreateRawdata() {
@@ -793,18 +2439,33 @@ func (This *NudgeExporter) CreateRawdata() {
 
 	if This.Rawdata == nil {
 		This.Rawdata = &pdata.RawData{}
+		This.Rawdata.Reset()
 
-		This.Rawdata.ServerConfig = &pdata.ServerConfig{}                 // clearServerConfig()
-		This.Rawdata.ThreadInfos = pdata.ThreadInfoList{}.Threads         // clearThreadinfosList()
-		This.Rawdata.SystemMetrics = make([]*pdata.SystemMetricSample, 0) // clearSystemmetricsList()
-		This.Rawdata.ClassDictionary = &pdata.Dictionary{}                // .clearClassdictionary()
-		This.Rawdata.MethodDictionary = &pdata.Dictionary{}               // .clearMethoddictionary()
-		This.Rawdata.ThreadActivity = &pdata.ThreadActivity{}             // .clearThreadactivity()
-
+		This.Rawdata.Id = &This.Cmpt // setId(This.Cmpt++)
 		This.Cmpt++
-		This.Rawdata.Id = &This.Cmpt                        // setId(This.Cmpt++)
-		This.Rawdata.AgentId = &This.Agentiduuid            // .setAgentid(This.Agentiduuid)
-		This.Rawdata.Hostname = stringPtr(service_hostname) // .setHostname(service_hostname)
+		This.Rawdata.AgentId = &This.Agentiduuid // .setAgentid(This.Agentiduuid)
+
+		if !This.Parent.InsertResource {
+			return
+		}
+
+		This.Rawdata.ServerConfig = &pdata.ServerConfig{} // clearServerConfig()
+		This.Rawdata.ServerConfig.Reset()
+		This.ThreadInfoList = &pdata.ThreadInfoList{}
+		This.ThreadInfoList.Reset()
+		This.Rawdata.ThreadInfos = This.ThreadInfoList.GetThreads() // clearThreadinfosList()
+
+		This.Rawdata.SystemMetrics = make([]*pdata.SystemMetricSample, 0) // clearSystemmetricsList()
+		This.Rawdata.ThreadActivity = &pdata.ThreadActivity{}             // .clearThreadactivity()
+		This.Rawdata.ThreadActivity.Reset()
+		classDictionary := &pdata.Dictionary{} // new proto.org.nudge.buffer.Dictionary();
+		classDictionary.Reset()
+		methodDictionary := &pdata.Dictionary{} // new proto.org.nudge.buffer.Dictionary();
+		methodDictionary.Reset()
+		This.Rawdata.MethodDictionary = methodDictionary // .setMethoddictionary(methodDictionary);
+		This.Rawdata.ClassDictionary = classDictionary   // .setClassdictionary(classDictionary);
+
+		This.Rawdata.Hostname = extensionlinux.StringPtr(service_hostname) // .setHostname(service_hostname)
 
 		// https://www.debugpointer.com/nodejs/md5-to-int-nodejs
 		// 1. Calcul du hash MD5
@@ -820,7 +2481,7 @@ func (This *NudgeExporter) CreateRawdata() {
 		// 5. Conversion en int (Go n'a pas de Number comme en JS)
 		hostKey := int64(signed64)
 
-		This.Rawdata.Hostkey = numberPtr(hostKey) // .setHostkey(hostkey);
+		This.Rawdata.Hostkey = extensionlinux.NumberPtr(hostKey) // .setHostkey(hostkey);
 		//This.Rawdata.setSegmentdictionary();
 		//This.Rawdata.setQuerydictionary();
 		//This.Rawdata.setClassdictionary();
@@ -832,22 +2493,23 @@ func (This *NudgeExporter) CreateRawdata() {
 		//var o = This.Rawdata.toObject();
 
 		if indexRawdata_MIN == -1 || This.IndexRawdata < indexRawdata_MIN {
-			serverConfig := pdata.ServerConfig{}                        // new proto.org.nudge.buffer.ServerConfig();
-			serverConfig.OsArch = stringPtr(runtime.GOARCH)             // .setOsarch(os.arch());
-			serverConfig.OsName = stringPtr(runtime.GOOS)               // .setOsname(os.version());
-			serverConfig.OsVersion = stringPtr(mySystem.GetOSVersion()) // .setOsversion(os.release());
+			serverConfig := &pdata.ServerConfig{} // new proto.org.nudge.buffer.ServerConfig();
+			serverConfig.Reset()
+			serverConfig.OsArch = extensionlinux.StringPtr(runtime.GOARCH)             // .setOsarch(os.arch());
+			serverConfig.OsName = extensionlinux.StringPtr(runtime.GOOS)               // .setOsname(os.version());
+			serverConfig.OsVersion = extensionlinux.StringPtr(mySystem.GetOSVersion()) // .setOsversion(os.release());
 
 			//cpus := cpu // os.cpus();
-			cpus, _ := cpu3.Counts(true)
-			serverConfig.AvailableProcessors = numberPtr(int32(cpus))         // .setAvailableprocessors(cpus.length);
-			serverConfig.VmName = stringPtr("CollectorOTLP@" + This.Hostname) // .setVmname(`CollectorOTLP@${os.hostname}`); //  pjson.description;
+			cpus, _ := cpu.Counts(true)
+			serverConfig.AvailableProcessors = extensionlinux.NumberPtr(int32(cpus))         // .setAvailableprocessors(cpus.length);
+			serverConfig.VmName = extensionlinux.StringPtr("CollectorOTLP@" + This.Hostname) // .setVmname(`CollectorOTLP@${os.hostname}`); //  pjson.description;
 			//TEMP serverConfig.VmVendor = pjson.vendor                       // .setVmvendor(pjson.vendor);
-			infos, _ := cpu3.Info()
+			infos, _ := cpu.Info()
 			//versions := Object.keys(process.versions).map(e => `${e}@${process.versions[e]}`).join(';');
-			versions := mySystem.Map(infos, func(t cpu3.InfoStat) string {
+			versions := extensionlinux.Map(infos, func(t cpu.InfoStat) string {
 				return t.ModelName + "|" + t.Family + "|" + strconv.FormatFloat(t.Mhz, 'f', 0, 64)
 			})
-			serverConfig.VmVersion = stringPtr(strings.Join(versions, ";")) // .setVmversion(versions);   // pjson.version);
+			serverConfig.VmVersion = extensionlinux.StringPtr(strings.Join(versions, ";")) // .setVmversion(versions);   // pjson.version);
 			//serverConfig.setVmversion(process.version);   // pjson.version);
 			//TEMP serverConfig.ServletContextName = pjson.name // .setServletcontextname(pjson.name);
 
@@ -873,66 +2535,59 @@ func (This *NudgeExporter) CreateRawdata() {
 			     },
 			*/
 
-			serverConfig.StartTime = numberPtr(time.Now().UnixMilli()) // .setStarttime(Date.now()); // PLantage lors du serialize Rawdata
+			serverConfig.StartTime = extensionlinux.NumberPtr(time.Now().UnixMilli()) // .setStarttime(Date.now()); // PLantage lors du serialize Rawdata
 
 			// Simule __dirname en JavaScript
 			// Compatible Windows & Linux, car filepath.Join utilise le bon séparateur (\ pour Windows, / pour Linux/Mac).
-			//TEMP exePath, err := os.Executable()
-			//TEMP if err != nil {
-			//TEMP dir := filepath.Dir(exePath) // __dirname en JS
-			// Construction du chemin absolu
-			//TEMP absolutePath := filepath.Join(dir, appJS)
-			//TEMP serverConfig.BootClassPath = absolutePath // .setBootclasspath(path.resolve(__dirname, appJS));
-			//TEMP }
+			exePath, err := os.Executable()
+			if err != nil {
+				dir := filepath.Dir(exePath) // __dirname en JS
+				// Construction du chemin absolu
+				absolutePath := filepath.Join(dir, "")                              // appJS est le chemin absolue de l'application cliente
+				serverConfig.BootClassPath = extensionlinux.StringPtr(absolutePath) // .setBootclasspath(path.resolve(__dirname, appJS));
+			}
 			// LINUX ADAPT
-			/*
-			   if (Array.isArray(This.dns))
-			     serverConfig.setCanonicalhostname(This.dns.reduce((a,e) => {
-			       a += e.addresses.join(';');
-			       return a;
-			     }, "" ));
-			*/
+			if len(This.Dns) > 0 {
+				ip, err := gateway.DiscoverGateway()
+				if err == nil {
+					a, err := net.LookupCNAME(ip.String())
+					if err == nil {
+						serverConfig.CanonicalHostName = extensionlinux.StringPtr(a)
+					}
+				}
+			}
+
 			//serverConfig.setCanonicalhostname(canonHost.name);
 			//serverConfig.setHostaddress();
-			serverConfig.HostName = stringPtr(service_hostname)                     // .setHostname(service_hostname);
-			serverConfig.AppName = stringPtr(This.Parent.NodeJS.ApplicationName)    // .setAppname(configurationNudge.Section("NodeJS").Key("applicationName").String());
-			platform := runtime.GOOS                                                // .platform();
-			serverConfig.Environment = stringPtr(platform)                          // .setEnvironment(platform.toString());
-			serverConfig.ServerName = stringPtr(This.Parent.NodeJS.ApplicationName) // .setServername(configurationNudge.Section("NodeJS").Key("applicationName").String());
+			serverConfig.HostName = extensionlinux.StringPtr(service_hostname)              // .setHostname(service_hostname);
+			serverConfig.AppName = extensionlinux.StringPtr(This.Parent.ApplicationName)    // .setAppname(configurationNudge.Section("NodeJS").Key("applicationName").String());
+			platform := runtime.GOOS                                                        // .platform();
+			serverConfig.Environment = extensionlinux.StringPtr(platform)                   // .setEnvironment(platform.toString());
+			serverConfig.ServerName = extensionlinux.StringPtr(This.Parent.ApplicationName) // .setServername(configurationNudge.Section("NodeJS").Key("applicationName").String());
 			//TEMP serverConfig.ServerInfo = pjson.description                                                               // .setServerinfo(pjson.description);
 			//TEMP serverConfig.ServerPort = process.debugPort                                                               // .setServerport(process.debugPort);
-			serverConfig.InputArguments = stringPtr(strings.Join(os.Args, ";")) // .setInputarguments(process.argv.join(';'));
+			serverConfig.InputArguments = extensionlinux.StringPtr(strings.Join(os.Args, ";")) // .setInputarguments(process.argv.join(';'));
 			//serverConfig.setDiagnosticconfig();
 			//TEMP serverConfig.NudgeVersion = pjson.version // .setNudgeversion(pjson.version);
 
-			jvmInfo := &pdata.JvmInfo{}       // new proto.org.nudge.buffer.JvmInfo();
+			jvmInfo := &pdata.JvmInfo{} // new proto.org.nudge.buffer.JvmInfo();
+			jvmInfo.Reset()
 			jvmInfo.HostName = &This.Hostname // .setHostname(service_hostname);
 			kvs := make([]*pdata.KeyValue, 0) // new Array();
 
-			/* Le 2025/03/17 14:40:00 a completer !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-			   if (This?.resourceOTEL?.autoInstrumentations != undefined)
-			   {
-			     This.resourceOTEL.autoInstrumentations.forEach(otel => {
-			       let kv = new proto.org.nudge.buffer.KeyValue();
-			       kv.setKey(otel.nom);
-			       kv.setValue(otel.version);
-			       kvs.push(kv);
-			     });
-			   }
-			*/
 			for _, k := range os.Environ() {
+				k = strings.SplitN(k, "=", 2)[0]
 				v := os.Getenv(k)
-				kv := pdata.KeyValue{}  // new proto.org.nudge.buffer.KeyValue();
-				kv.Key = stringPtr(k)   // .setKey(k);
-				kv.Value = stringPtr(v) // .setValue(v);
-				kvs = append(kvs, &kv)
+				kv := &pdata.KeyValue{} // new proto.org.nudge.buffer.KeyValue();
+				kv.Reset()
+				kv.Key = extensionlinux.StringPtr(k)   // .setKey(k);
+				kv.Value = extensionlinux.StringPtr(v) // .setValue(v);
+				kvs = append(kvs, kv)
 			}
 			jvmInfo.SystemProperties = kvs // .setSystempropertiesList(kvs);
 			serverConfig.JvmInfo = jvmInfo // .setJvminfo(jvmInfo);
 
-			//serverConfig.setSystemproperties(sps);
-
-			This.Rawdata.ServerConfig = &serverConfig // .setServerconfig(serverConfig);
+			This.Rawdata.ServerConfig = serverConfig // .setServerconfig(serverConfig);
 		}
 
 		//var gcActivity = new proto.org.nudge.buffer.GcActivity();
@@ -979,27 +2634,24 @@ func (This *NudgeExporter) CreateRawdata() {
 		//var systemMetric = This.Rawdata.getSystemmetricsList();
 		//This.Rawdata.clearSystemmetricsList();
 
-		classDictionary := &pdata.Dictionary{}           // new proto.org.nudge.buffer.Dictionary();
-		methodDictionary := &pdata.Dictionary{}          // new proto.org.nudge.buffer.Dictionary();
-		This.Rawdata.MethodDictionary = methodDictionary // .setMethoddictionary(methodDictionary);
-		This.Rawdata.ClassDictionary = classDictionary   // .setClassdictionary(classDictionary);
-
-		memoryUsage, _ := mySystem.GetMemoryWindows()
+		memoryUsage, memStats, _ := mySystem.GetMemoryWindows()
 
 		getAlldrivesX := func() {
 
-			systemMetricSample := &pdata.SystemMetricSample{}                                   // new proto.org.nudge.buffer.SystemMetricSample();
-			dateNow := time.Now().UTC().UnixMilli()                                             // Date.now();
-			systemMetricSample.Key = stringPtr("mem.free")                                      // .setKey(`mem.free`);
-			systemMetricSample.Timestamp = &dateNow                                             // .setTimestamp(dateNow);
-			systemMetricSample.LongValue = numberPtr(int64(memoryUsage.AvailPhys))              // .setLongvalue(os.freemem());
-			This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+			systemMetricSample := &pdata.SystemMetricSample{} // new proto.org.nudge.buffer.SystemMetricSample();
+			systemMetricSample.Reset()
+			dateNow := time.Now().UTC().UnixMilli()                                                  // Date.now();
+			systemMetricSample.Key = extensionlinux.StringPtr("mem.free")                            // .setKey(`mem.free`);
+			systemMetricSample.Timestamp = &dateNow                                                  // .setTimestamp(dateNow);
+			systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.AvailPhys))    // .setLongvalue(os.freemem());
+			This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
-			systemMetricSample = &pdata.SystemMetricSample{}                                    // new proto.org.nudge.buffer.SystemMetricSample();
-			systemMetricSample.Key = stringPtr("mem.total")                                     // .setKey(`mem.total`);
-			systemMetricSample.Timestamp = &dateNow                                             // .setTimestamp(dateNow);
-			systemMetricSample.LongValue = numberPtr(int64(memoryUsage.TotalPhys))              // .setLongvalue(os.totalmem());
-			This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+			systemMetricSample = &pdata.SystemMetricSample{} // new proto.org.nudge.buffer.SystemMetricSample();
+			systemMetricSample.Reset()
+			systemMetricSample.Key = extensionlinux.StringPtr("mem.total")                           // .setKey(`mem.total`);
+			systemMetricSample.Timestamp = &dateNow                                                  // .setTimestamp(dateNow);
+			systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.TotalPhys))    // .setLongvalue(os.totalmem());
+			This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
 			// Il faut au moins 5 secondes de temps pour mesurer la charge process
 			//TEMP if oSU.dateNow {
@@ -1013,16 +2665,18 @@ func (This *NudgeExporter) CreateRawdata() {
 				*/
 
 				systemMetricSample = &pdata.SystemMetricSample{} // new proto.org.nudge.buffer.SystemMetricSample();
-				systemMetricSample.Key = stringPtr("cpu.load")   // .setKey(`mem.total`);
+				systemMetricSample.Reset()
+				systemMetricSample.Key = extensionlinux.StringPtr("cpu.load") // .setKey(`mem.total`);
 				//TEMP systemMetricSample.Timestamp = oSU.dateNow                                          // .setTimestamp(dateNow);
 				//TEMP systemMetricSample.DoubleValue = oSU.cpuPercentage / 100                            // .setLongvalue(os.totalmem());
-				This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+				//This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
 				systemMetricSample = &pdata.SystemMetricSample{}
-				systemMetricSample.Key = stringPtr("load")
+				systemMetricSample.Reset()
+				systemMetricSample.Key = extensionlinux.StringPtr("load")
 				//TEMP systemMetricSample.Timestamp = oSU.dateNow
 				//TEMP systemMetricSample.DoubleValue = oSU.cpuPercentageNode
-				This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+				//This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 			}
 
 			// La swap ne fonctionne pas sous NodeJS
@@ -1031,43 +2685,48 @@ func (This *NudgeExporter) CreateRawdata() {
 			//memoryUsage = process.memoryUsage();
 			if memoryUsage.AvailPhys > 0 { //  || global.gc)
 				systemMetricSample = &pdata.SystemMetricSample{}
-				systemMetricSample.Key = stringPtr("swap.free")
+				systemMetricSample.Reset()
+				systemMetricSample.Key = extensionlinux.StringPtr("swap.free")
 				systemMetricSample.Timestamp = &dateNow
-				systemMetricSample.LongValue = numberPtr(int64(memoryUsage.AvailPhys))
-				This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+				systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.AvailPhys))
+				This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 			}
 			if memoryUsage.TotalPhys > 0 { //  || global.gc)
 				systemMetricSample = &pdata.SystemMetricSample{}
-				systemMetricSample.Key = stringPtr("swap.total")
+				systemMetricSample.Reset()
+				systemMetricSample.Key = extensionlinux.StringPtr("swap.total")
 				systemMetricSample.Timestamp = &dateNow
-				systemMetricSample.LongValue = numberPtr(int64(memoryUsage.TotalPhys))
-				This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+				systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.TotalPhys))
+				This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 			}
 
 			//TEMP if oSU.openFd != "not supported" {
 			systemMetricSample = &pdata.SystemMetricSample{}
-			systemMetricSample.Key = stringPtr("proc.fd.open")
+			systemMetricSample.Reset()
+			systemMetricSample.Key = extensionlinux.StringPtr("proc.fd.open")
 			systemMetricSample.Timestamp = &dateNow
 			//TEMP systemMetricSample.LongValue = oSU.openFd
-			This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+			//This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 			//TEMP }
 
 			//let swap = getSwapSize();
 			// Linux stat.Totalswap * uint64(stat.Unit), stat.Freeswap * uint64(stat.Unit)
 			// Windows
 			systemMetricSample = &pdata.SystemMetricSample{}
-			systemMetricSample.Key = stringPtr("disk.total#[SWAP]")
+			systemMetricSample.Reset()
+			systemMetricSample.Key = extensionlinux.StringPtr("disk.total#[SWAP]")
 			systemMetricSample.Timestamp = &dateNow
 			//systemMetricSample.setDoublevalue();
-			systemMetricSample.LongValue = numberPtr(int64(memoryUsage.TotalPageFile))
-			This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+			systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.TotalPageFile))
+			This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
 			systemMetricSample = &pdata.SystemMetricSample{}
-			systemMetricSample.Key = stringPtr("disk.free#[SWAP]")
+			systemMetricSample.Reset()
+			systemMetricSample.Key = extensionlinux.StringPtr("disk.free#[SWAP]")
 			systemMetricSample.Timestamp = &dateNow
 			//systemMetricSample.setDoublevalue();
-			systemMetricSample.LongValue = numberPtr(int64(memoryUsage.AvailPageFile))
-			This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+			systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(memoryUsage.AvailPageFile))
+			This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
 			/*
 			   drives[1]: {
@@ -1101,37 +2760,43 @@ func (This *NudgeExporter) CreateRawdata() {
 					if drive["path"].(string) != "[SWAP]" {
 						key := `disk.total#${drive.device} - partition:${drive.partitionTableType} - isSystem:${drive.isSystem ? 'Oui' : 'Non'} - isUSB:${drive.isUSB ? 'Oui' : 'Non'} - isVirtual:${drive.isVirtual ? 'Oui' : 'Non'} - busType:${drive.busType} - busVersion:${drive.busVersion} - description:${drive.description} - mount(s):${drive.mountpoints.map((e) => e.path).join(',')}`
 						systemMetricSample = &pdata.SystemMetricSample{}
+						systemMetricSample.Reset()
 						systemMetricSample.Key = &key
-						systemMetricSample.Timestamp = numberPtr(dateNow)
+						systemMetricSample.Timestamp = extensionlinux.NumberPtr(dateNow)
 						//systemMetricSample.setDoublevalue();
 						//TEMP systemMetricSample.LongValue = drive.size
-						This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+						//This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
-						for i := 0; i < len(drive["mountpoints"].([]string)); i++ {
-							part := drive["mountpoints"].([]any)[i].(map[string]any)
-							var diskSpace any
-							if part["path"].(string) != "[SWAP]" {
-								//TEMP diskSpace = This.AllDrives["drives"][part.path]
-							} else {
-								diskSpace = mySystem.TotalFree{Total: 0 /*swap.size*/, Free: 0 /*wap.free*/}
-							}
+						if drives, b := drive["mountpoints"].([]any); b {
+							for _, driveX := range drives {
+								if part, b := driveX.(map[string]any); b {
+									var diskSpace any
+									if t, b := part["path"].(string); b && t != "[SWAP]" {
+										//TEMP diskSpace = This.AllDrives["drives"][part.path]
+									} else {
+										diskSpace = mySystem.TotalFree{Total: 0 /*swap.size*/, Free: 0 /*wap.free*/}
+									}
 
-							if diskSpace != nil {
-								systemMetricSample = &pdata.SystemMetricSample{}
-								systemMetricSample.Key = stringPtr("disk.total#${part.path}")
-								systemMetricSample.Timestamp = numberPtr(dateNow)
-								//systemMetricSample.setDoublevalue();
-								//TEMP systemMetricSample.LongValue = numberPtr(int64(diskSpace.size))
+									if diskSpace != nil {
+										systemMetricSample = &pdata.SystemMetricSample{}
+										systemMetricSample.Reset()
+										systemMetricSample.Key = extensionlinux.StringPtr("disk.total#${part.path}")
+										systemMetricSample.Timestamp = extensionlinux.NumberPtr(dateNow)
+										//systemMetricSample.setDoublevalue();
+										//TEMP systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(diskSpace.size))
 
-								This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+										This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
 
-								systemMetricSample = &pdata.SystemMetricSample{}
-								systemMetricSample.Key = stringPtr("disk.free#${part.path}")
-								systemMetricSample.Timestamp = numberPtr(dateNow)
-								//systemMetricSample.setDoublevalue();
-								//TEMP systemMetricSample.LongValue = numberPtr(int64(diskSpace.free))
+										systemMetricSample = &pdata.SystemMetricSample{}
+										systemMetricSample.Reset()
+										systemMetricSample.Key = extensionlinux.StringPtr("disk.free#${part.path}")
+										systemMetricSample.Timestamp = extensionlinux.NumberPtr(dateNow)
+										//systemMetricSample.setDoublevalue();
+										//TEMP systemMetricSample.LongValue = extensionlinux.NumberPtr(int64(diskSpace.free))
 
-								This.Rawdata.SystemMetrics = append(This.Rawdata.SystemMetrics, systemMetricSample) // .addSystemmetrics(systemMetricSample);
+										This.Rawdata.SystemMetrics = append(This.Rawdata.GetSystemMetrics(), systemMetricSample) // .addSystemmetrics(systemMetricSample);
+									}
+								}
 							}
 						}
 					}
@@ -1141,21 +2806,75 @@ func (This *NudgeExporter) CreateRawdata() {
 		getAlldrivesX()
 
 		heapMemory := &pdata.HeapMemory{} // new proto.org.nudge.buffer.HeapMemory();
-		heapMemory.StartTime = numberPtr(time.Now().UTC().UnixMilli())
-		//TEMP heapMemory.Used = numberPtr(int64(memoryUsage.heapUsed))
-		//TEMP heapMemory.Total = numberPtr(int64(memoryUsage.heapTotal))
-		heapMemory.EndTime = numberPtr(time.Now().UTC().UnixMilli())
+		heapMemory.Reset()
+		heapMemory.StartTime = extensionlinux.NumberPtr(time.Now().UTC().UnixMilli())
+		heapMemory.Used = extensionlinux.NumberPtr(int64(memStats.HeapInuse))
+		heapMemory.Total = extensionlinux.NumberPtr(int64(memStats.TotalAlloc))
+		heapMemory.EndTime = extensionlinux.NumberPtr(time.Now().UTC().UnixMilli())
 		This.Rawdata.HeapMemory = heapMemory
 
-		threadActivity := &pdata.ThreadActivity{}                          // new proto.org.nudge.buffer.ThreadActivity();
-		threadActivity.StartTime = numberPtr(time.Now().UTC().UnixMilli()) // process.startTime
-		threadActivity.Count = numberPtr[int32](1)
-		threadActivity.DaemonThreadCount = numberPtr[int32](0)
-		threadActivity.NewThreadCount = numberPtr[int32](0)
-		//TEMP cpuUsage := process.cpuUsage()
-		//TEMP threadActivity.CpuTime = cpuUsage.system
-		//TEMP threadActivity.UserTime = cpuUsage.user
-		threadActivity.EndTime = numberPtr(time.Now().UTC().UnixMilli())
+		threadActivity := &pdata.ThreadActivity{} // new proto.org.nudge.buffer.ThreadActivity();
+		threadActivity.Reset()
+		threadActivity.StartTime = extensionlinux.NumberPtr(time.Now().UTC().UnixMilli()) // process.startTime
+		threadActivity.Count = extensionlinux.NumberPtr[int32](1)
+		threadActivity.DaemonThreadCount = extensionlinux.NumberPtr[int32](0)
+		threadActivity.NewThreadCount = extensionlinux.NumberPtr[int32](0)
+		//cpuUsage := process.cpuUsage()
+		/*
+					    // Utilisation CPU globale sur 1 seconde
+			    percentages, err := cpu.Percent(time.Second, false)
+			    if err != nil {
+			        panic(err)
+			    }
+			    fmt.Printf("Utilisation CPU globale : %.2f%%\n", percentages[0])
+
+			    // Utilisation CPU par core
+			    perCore, err := cpu.Percent(time.Second, true)
+			    if err != nil {
+			        panic(err)
+			    }
+			    for i, pct := range perCore {
+			        fmt.Printf("Core %d : %.2f%%\n", i, pct)
+			    }
+		*/
+
+		/*
+				// Snapshot 1
+			t1, err := cpu.Times(false)
+			if err != nil {
+				panic(err)
+			}
+			time.Sleep(1 * time.Second) // délai pour mesurer la différence
+
+			// Snapshot 2
+			t2, err := cpu.Times(false)
+			if err != nil {
+				panic(err)
+			}
+
+			// Calcul des deltas
+			deltaUser := t2[0].User - t1[0].User
+			deltaSystem := t2[0].System - t1[0].System
+			deltaIdle := t2[0].Idle - t1[0].Idle
+			deltaTotal := deltaUser + deltaSystem + deltaIdle + (t2[0].Nice - t1[0].Nice) + (t2[0].Iowait - t1[0].Iowait) + (t2[0].Irq - t1[0].Irq) + (t2[0].Softirq - t1[0].Softirq) + (t2[0].Steal - t1[0].Steal)
+
+			userPercent := (deltaUser / deltaTotal) * 100
+			systemPercent := (deltaSystem / deltaTotal) * 100
+			idlePercent := (deltaIdle / deltaTotal) * 100
+
+			fmt.Printf("User CPU :   %.2f%%\n", userPercent)
+			fmt.Printf("System CPU : %.2f%%\n", systemPercent)
+			fmt.Printf("Idle CPU :   %.2f%%\n", idlePercent)
+		*/
+		threadActivity.CpuTime = extensionlinux.NumberPtr(int64(metricsInterne.CPUUsage.Value))
+		threadActivity.UserTime = extensionlinux.NumberPtr(int64(metricsInterne.CPUUsage.Value))
+		threadActivity.EndTime = extensionlinux.NumberPtr(threadActivity.GetStartTime() + int64(time.Second*5)) //extensionlinux.NumberPtr(time.Now().UTC().UnixMilli())
+		/*
+					infos, _ := cpu.Info()
+			for _, ci := range infos {
+			    fmt.Printf("CPU : %v @ %.2f MHz (Cores logiques: %d)\n", ci.ModelName, ci.Mhz, ci.Cores)
+			}
+		*/
 		This.Rawdata.ThreadActivity = threadActivity
 
 		This.Rawdata.Components = This.Components
@@ -1245,13 +2964,4 @@ func (This *NudgeExporter) CreateRawdata() {
 		}
 		//let transactions = This.Rawdata.getTransactionsList(); // new Array();
 	}
-}
-
-func stringPtr(s string) *string {
-	c := strings.Clone(s)
-	return &c
-}
-func numberPtr[T int64 | uint64 | int32 | uint32 | int | uint](s T) *T {
-	c := s
-	return &c
 }

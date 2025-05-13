@@ -11,8 +11,17 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 )
+
+// supportedLevels in this exporter's configuration.
+// configtelemetry.LevelNone and other future values are not supported.
+var supportedLevels map[configtelemetry.Level]struct{} = map[configtelemetry.Level]struct{}{
+	configtelemetry.LevelBasic:    {},
+	configtelemetry.LevelNormal:   {},
+	configtelemetry.LevelDetailed: {},
+}
 
 // EncodingType defines the type for content encoding
 type EncodingType string
@@ -44,20 +53,33 @@ func (e *EncodingType) UnmarshalText(text []byte) error {
 }
 
 type NodeJS struct {
-	ApplicationName    string `mapstructure:"applicationName"`
-	PrefixeServiceName string `mapstructure:"prefixeServiceName"`
-	UnknownClass       string `mapstructure:"unknownClass"`
-	UnknownFunction    string `mapstructure:"unknownFunction"`
+	UnknownClass    string `mapstructure:"unknownClass"`
+	UnknownFunction string `mapstructure:"unknownFunction"`
+}
+
+type ConsoleX struct {
+	Verbosity configtelemetry.Level `mapstructure:"verbosity,omitempty"`
 }
 
 // NudgeHTTPClientConfig étend confighttp.ClientConfig avec des champs personnalisés.
 type NudgeHTTPClientConfig struct {
-	confighttp.ClientConfig `mapstructure:",squash"`
-	AppID                   string `mapstructure:"app_id"`
-	PathCollect             string `mapstructure:"pathCollect"`
-	Method                  string `mapstructure:"method"`
-	Log                     bool   `mapstructure:"log"`
-	NodeJS                  NodeJS `mapstructure:"nodeJS"`
+	confighttp.ClientConfig  `mapstructure:",squash"`
+	AppID                    string   `mapstructure:"app_id"`
+	PathCollect              string   `mapstructure:"pathCollect"`
+	Method                   string   `mapstructure:"method"`
+	NodeJS                   NodeJS   `mapstructure:"nodeJS"`
+	Console                  ConsoleX `mapstructure:"console"`
+	RecordCollecte           bool     `mapstructure:"recordCollecte"`
+	InsertResource           bool     `mapstructure:"insertResource"`
+	TimeoutBufferTransaction int64    `mapstructure:"timeoutBufferTransaction"`
+	ApplicationName          string   `mapstructure:"applicationName"`
+	PrefixeServiceName       string   `mapstructure:"prefixeServiceName"`
+	FilterHeader             []string `mapstructure:"filterHeader"`
+	SessionId                string   `mapstructure:"sessionId"`
+	SendUserConnectionString bool     `mapstructure:"sendUserConnectionString"`
+	RefreshScanDrives        float64  `mapstructure:"refreshScanDrives"`
+	RefreshLoadCPU           float64  `mapstructure:"refreshLoadCPU"`
+	WaitEndService           bool     `mapstructure:"waitEndService"`
 }
 
 func NewDefaultNudgeHTTPClientConfig() NudgeHTTPClientConfig {
