@@ -24,7 +24,7 @@ builds:
         goarch: ppc64le
       - goos: darwin
         goarch: ppc64le
-    binary: ocb
+    binary: ocb.exe
 dockers:
   - goos: linux
     goarch: amd64

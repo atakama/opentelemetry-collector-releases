@@ -53,7 +53,7 @@ func newDebugExporter(logger *zap.Logger, verbosity configtelemetry.Level) *debu
 }
 
 func (s *debugExporter) pushTraces(_ context.Context, td ptrace.Traces) error {
-	s.logger.Info("Traces ATK",
+	s.logger.Info("Traces Atakama-Technologies",
 		zap.Int("resource spans", td.ResourceSpans().Len()),
 		zap.Int("spans", td.SpanCount()))
 	if s.verbosity == configtelemetry.LevelBasic {
@@ -69,7 +69,7 @@ func (s *debugExporter) pushTraces(_ context.Context, td ptrace.Traces) error {
 }
 
 func (s *debugExporter) pushMetrics(_ context.Context, md pmetric.Metrics) error {
-	s.logger.Info("Metrics ATK",
+	s.logger.Info("Metrics Atakama-Technologies",
 		zap.Int("resource metrics", md.ResourceMetrics().Len()),
 		zap.Int("metrics", md.MetricCount()),
 		zap.Int("data points", md.DataPointCount()))
@@ -86,7 +86,7 @@ func (s *debugExporter) pushMetrics(_ context.Context, md pmetric.Metrics) error
 }
 
 func (s *debugExporter) pushLogs(_ context.Context, ld plog.Logs) error {
-	s.logger.Info("Logs ATK",
+	s.logger.Info("Logs Atakama-Technologies",
 		zap.Int("resource logs", ld.ResourceLogs().Len()),
 		zap.Int("log records", ld.LogRecordCount()))
 
@@ -103,7 +103,7 @@ func (s *debugExporter) pushLogs(_ context.Context, ld plog.Logs) error {
 }
 
 func (s *debugExporter) pushProfiles(_ context.Context, pd pprofile.Profiles) error {
-	s.logger.Info("Profiles ATK",
+	s.logger.Info("Profiles Atakama-Technologies",
 		zap.Int("resource profiles", pd.ResourceProfiles().Len()),
 		zap.Int("sample records", pd.SampleCount()))
 
