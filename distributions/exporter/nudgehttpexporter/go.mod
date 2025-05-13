@@ -27,8 +27,8 @@ require (
 	go.opentelemetry.io/collector/exporter/exporterhelper/xexporterhelper v0.124.0
 	go.opentelemetry.io/collector/exporter/exportertest v0.124.0
 	go.opentelemetry.io/collector/exporter/xexporter v0.124.0
-	go.opentelemetry.io/collector/pdata v0.0.0-00010101000000-000000000000
-	go.opentelemetry.io/collector/pdata/pprofile v0.0.0-00010101000000-000000000000
+	go.opentelemetry.io/collector/pdata v0.1.0
+	go.opentelemetry.io/collector/pdata/pprofile v0.1.0
 	go.opentelemetry.io/otel v1.35.0
 	go.uber.org/goleak v1.3.0
 	go.uber.org/zap v1.27.0
@@ -103,8 +103,8 @@ require (
 replace (
 	extensionlinux => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\ExtensionLinux
 	mySystem => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\mySystem
-	go.opentelemetry.io/collector/pdata v0.0.0-00010101000000-000000000000 => ../../pdata
-	go.opentelemetry.io/collector/pdata/pprofile v0.0.0-00010101000000-000000000000 => ../../pdata/pprofile
+	go.opentelemetry.io/collector/pdata v0.1.0 => ../../pdata
+	go.opentelemetry.io/collector/pdata/pprofile v0.1.0 => ../../pdata/pprofile
 )
 
 retract (

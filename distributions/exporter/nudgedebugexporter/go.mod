@@ -51,6 +51,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace go.opentelemetry.io/collector/pdata v0.1.0 => ../../pdata
+replace go.opentelemetry.io/collector/pdata => ../../pdata
 
-replace go.opentelemetry.io/collector/pdata/pprofile v0.1.0 => ../../pdata/pprofile
+replace go.opentelemetry.io/collector/pdata/pprofile => ../../pdata/pprofile
