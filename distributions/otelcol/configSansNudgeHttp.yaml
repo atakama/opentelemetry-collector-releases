@@ -50,43 +50,6 @@ exporters:
     verbosity: Detailed
   nudgedebug:
     verbosity: Detailed
-  nudgehttp:
-    endpoint: https://ph-apm.dev.atakama-technologies.com
-    # Il est possible de laisser la valeur par defaut si non définie dans la partie processor
-    app_id: 00000000-0000-0000-0000-000000000000
-    # chemin de la requete http, par defaut /collect/rawdata
-    pathCollect: /collect/rawdata
-    # methode http pour le flush des rawdatas
-    method: PUT
-    # encodage du rawadata. proto, json
-    encoding: proto # -> application/x-protobuf
-    # Enregistrement du rawdata brut sur disque
-    recordCollecte: true
-    # Insertion des métriques resources (disque, memoire, cpu)
-    insertResource: true
-    # Timeout du Buffer Transaction en secondes
-    timeoutBufferTransaction: 60
-    # Prefixe nom du service s'affiche dans la map, par defaut NodeJS_1
-    prefixeServiceName: NodeJS_1
-    # Nom de l'application et du serveur, inseré dans le rawdata, par defaut APP_CCC
-    applicationName: APP_CCC
-    # Ajout ou pas pour des raison de sécurité du login de connexion à une base de donnée
-    sendUserConnectionString: true
-    # Temps en minutes de rafraichissement des lecteurs physiques & logiques (CF : Worker.js), par defaut 10
-    refreshScanDrives: 60
-    # Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s
-    refreshLoadCPU: 30
-    # Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vrs le rawdata, par defaut true
-    waitEndService: true
-    nodeJS:
-      # Fonction inconnue
-      # UnknownFunction=UnknownFunction, par defaut F?
-      unknownFunction: F?
-      # Classe inconnue
-      # UnknownClass=UnknownClass, par defaut C?
-      unknownClass: C?
-    console:
-      verbosity: Detailed
 
 service:
   pipelines:
