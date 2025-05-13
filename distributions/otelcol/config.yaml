@@ -94,17 +94,17 @@ service:
       receivers: [otlp]
       # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
       processors: [memory_limiter, batch]
-      exporters: [nudgedebug]
+      exporters: [nudgehttp, nudgedebug]
     metrics:
       receivers: [otlp]
       # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
       processors: [memory_limiter, batch]
-      exporters: [nudgedebug]
+      exporters: [nudgehttp, nudgedebug]
     logs:
       receivers: [otlp]
       # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
       processors: [memory_limiter, batch]
-      exporters: [nudgedebug]
+      exporters: [nudgehttp, nudgedebug]
 
   # http://127.0.0.1:15680/debug/servicez
   # http://127.0.0.1:15680/debug/tracez
