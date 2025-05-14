@@ -77,6 +77,8 @@ const (
 	// 1 => erreur HTTP , 2 => erreur SQL
 	Error_HTTP = 1
 	Error_SQL  = 2
+
+	Nudge_application_id = "nudge_application_id"
 )
 
 type Telemetry struct {

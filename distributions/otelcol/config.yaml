@@ -1,4 +1,7 @@
 extensions:
+  health_check:
+  pprof:
+    endpoint: 0.0.0.0:1777
   zpages:
     # http://127.0.0.1:15680/debug/servicez
     endpoint: localhost:15680
@@ -22,28 +25,33 @@ processors:
 
   batch:
 
-  # add_app_id_java:  # <-- alias
-  #   type: attributes
-  #   attributes:
-  #     - action: insert
-  #       key: nudge_application_id
-  #       value: 95776b60-b22d-4b95-801b-4137a6ee1f98
-  #   include:
-  #     match_type: strict
-  #     resource_attributes:
-  #       - key: telemetry.sdk.language
-  #         value: java
-  # add_app_id_node:  # <-- alias
-  #   type: attributes
-  #   attributes:
-  #     - action: insert
-  #       key: nudge_application_id
-  #       value: be6abaf9-ba97-4483-b502-24110c805270
-  #   include:
-  #     match_type: strict
-  #     resource_attributes:
-  #       - key: telemetry.sdk.language
-  #         value: nodejs
+  # Ajout de l'ID d'application pour les traces envoyées par Java
+  attributes/add_app_id_java:
+    actions:
+      - action: insert
+        key: nudge_application_id
+        value: 95776b60-b22d-4b95-801b-4137a6ee1f98
+    include:
+      match_type: strict
+      # attributes ou resources
+      resources:
+        - key: telemetry.sdk.language
+          value: java
+        - key: service.name
+          value: petclinic
+
+  # Ajout de l'ID d'application pour les traces envoyées par NodeJS
+  attributes/add_app_id_node:
+    actions:
+      - action: insert
+        key: nudge_application_id
+        value: be6abaf9-ba97-4483-b502-24110c805270
+    include:
+      match_type: strict
+      # attributes ou resources
+      resources:
+        - key: telemetry.sdk.language
+          value: nodejs
 
 exporters:
   debug:
@@ -92,8 +100,8 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, attributes/add_app_id_java, attributes/add_app_id_node, batch]
+      #processors: [memory_limiter, batch]
       exporters: [nudgehttp, nudgedebug]
     metrics:
       receivers: [otlp]
@@ -108,4 +116,4 @@ service:
 
   # http://127.0.0.1:15680/debug/servicez
   # http://127.0.0.1:15680/debug/tracez
-  extensions: [zpages]
+  extensions: [health_check, pprof, zpages]

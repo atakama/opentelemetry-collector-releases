@@ -1,71 +1,119 @@
-# To limit exposure to denial of service attacks, change the host in endpoints below from 0.0.0.0 to a specific network interface.
-# See https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/security-best-practices.md#safeguards-against-denial-of-service-attacks
-
 extensions:
   health_check:
   pprof:
     endpoint: 0.0.0.0:1777
   zpages:
-    endpoint: 0.0.0.0:55679
+    # http://127.0.0.1:15680/debug/servicez
+    endpoint: localhost:15680
 
 receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
+        endpoint: localhost:4317
       http:
-        endpoint: 0.0.0.0:4318
-
-  opencensus:
-    endpoint: 0.0.0.0:55678
-
-  # Collect own metrics
-  prometheus:
-    config:
-      scrape_configs:
-      - job_name: 'otel-collector'
-        scrape_interval: 10s
-        static_configs:
-        - targets: ['0.0.0.0:8888']
-
-  jaeger:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:14250
-      thrift_binary:
-        endpoint: 0.0.0.0:6832
-      thrift_compact:
-        endpoint: 0.0.0.0:6831
-      thrift_http:
-        endpoint: 0.0.0.0:14268
-
-  zipkin:
-    endpoint: 0.0.0.0:9411
-
+        endpoint: localhost:4318
+    
 processors:
+
+  memory_limiter:
+    # 75% of maximum memory up to 2G
+    limit_mib: 1536
+    # 25% of limit up to 2G
+    spike_limit_mib: 512
+    check_interval: 5s
+
   batch:
+
+  # Ajout de l'ID d'application pour les traces envoyées par Java
+  attributes/add_app_id_java:
+    actions:
+      - action: insert
+        key: nudge_application_id
+        value: 95776b60-b22d-4b95-801b-4137a6ee1f98
+    include:
+      match_type: strict
+      # attributes ou resources
+      resources:
+        - key: telemetry.sdk.language
+          value: java
+        - key: service.name
+          value: petclinic
+
+  # Ajout de l'ID d'application pour les traces envoyées par NodeJS
+  attributes/add_app_id_node:
+    actions:
+      - action: insert
+        key: nudge_application_id
+        value: be6abaf9-ba97-4483-b502-24110c805270
+    include:
+      match_type: strict
+      # attributes ou resources
+      resources:
+        - key: telemetry.sdk.language
+          value: nodejs
 
 exporters:
   debug:
-    verbosity: detailed
+    verbosity: Detailed
+  nudgedebug:
+    verbosity: Detailed
+  nudgehttp:
+    endpoint: https://ph-apm.dev.atakama-technologies.com
+    # Il est possible de laisser la valeur par defaut si non définie dans la partie processor
+    app_id: 00000000-0000-0000-0000-000000000000
+    # chemin de la requete http, par defaut /collect/rawdata
+    pathCollect: /collect/rawdata
+    # methode http pour le flush des rawdatas
+    method: PUT
+    # encodage du rawadata. proto, json
+    encoding: proto # -> application/x-protobuf
+    # Enregistrement du rawdata brut sur disque
+    recordCollecte: true
+    # Insertion des métriques resources (disque, memoire, cpu)
+    insertResource: true
+    # Timeout du Buffer Transaction en secondes
+    timeoutBufferTransaction: 60
+    # Prefixe nom du service s'affiche dans la map, par defaut NodeJS_1
+    prefixeServiceName: NodeJS_1
+    # Nom de l'application et du serveur, inseré dans le rawdata, par defaut APP_CCC
+    applicationName: APP_CCC
+    # Ajout ou pas pour des raison de sécurité du login de connexion à une base de donnée
+    sendUserConnectionString: true
+    # Temps en minutes de rafraichissement des lecteurs physiques & logiques (CF : Worker.js), par defaut 10
+    refreshScanDrives: 60
+    # Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s
+    refreshLoadCPU: 30
+    # Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vrs le rawdata, par defaut true
+    waitEndService: true
+    nodeJS:
+      # Fonction inconnue
+      # UnknownFunction=UnknownFunction, par defaut F?
+      unknownFunction: F?
+      # Classe inconnue
+      # UnknownClass=UnknownClass, par defaut C?
+      unknownClass: C?
+    console:
+      verbosity: Detailed
 
 service:
-
   pipelines:
-
     traces:
-      receivers: [otlp, opencensus, jaeger, zipkin]
-      processors: [batch]
-      exporters: [debug]
-
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/add_app_id_java, attributes/add_app_id_node, batch]
+      #processors: [memory_limiter, batch]
+      exporters: [nudgehttp, nudgedebug]
     metrics:
-      receivers: [otlp, opencensus, prometheus]
-      processors: [batch]
-      exporters: [debug]
-
+      receivers: [otlp]
+      # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
+      processors: [memory_limiter, batch]
+      exporters: [nudgehttp, nudgedebug]
     logs:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
+      # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
+      processors: [memory_limiter, batch]
+      exporters: [nudgehttp, nudgedebug]
 
+  # http://127.0.0.1:15680/debug/servicez
+  # http://127.0.0.1:15680/debug/tracez
   extensions: [health_check, pprof, zpages]

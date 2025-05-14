@@ -43,6 +43,14 @@ exporters:
   - gomod: go.opentelemetry.io/collector/exporter/nopexporter v0.122.1
   - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.122.1
   - gomod: go.opentelemetry.io/collector/exporter/otlphttpexporter v0.122.1
+  - gomod: go.opentelemetry.io/collector/exporter/nudgedebugexporter v0.1.0
+    path: ../exporter/nudgedebugexporter
+    import: go.opentelemetry.io/collector/exporter/nudgedebugexporter
+    name: nudgedebugexporter
+  - gomod: go.opentelemetry.io/collector/exporter/nudgehttpexporter v0.1.0
+    path: ../exporter/nudgehttpexporter
+    import: go.opentelemetry.io/collector/exporter/nudgehttpexporter
+    name: nudgehttpexporter
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/alibabacloudlogserviceexporter v0.122.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awscloudwatchlogsexporter v0.122.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awsemfexporter v0.122.0
@@ -246,3 +254,15 @@ providers:
 replaces:
   # see https://github.com/openshift/api/pull/1515
   - github.com/openshift/api => github.com/openshift/api v0.0.0-20230726162818-81f778f3b3ec
+
+#replaces:
+  # a list of "replaces" directives that will be part of the resulting go.mod
+  - extensionlinux => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\ExtensionLinux
+  - mySystem => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\mySystem
+  - go.opentelemetry.io/collector/pdata => ../../pdata
+  - go.opentelemetry.io/collector/pdata/pprofile => ../../pdata/pprofile
+  #- go.opentelemetry.io/collector/exporter/nudgehttpexporter => C:\opentelemetry-collector-releases\distributions\exporter\nudgehttpexporter
+  #- go.opentelemetry.io/collector/exporter/nudgedebugexporter => C:\opentelemetry-collector-releases\distributions\exporter\nudgedebugexporter
+  #- go.opentelemetry.io/collector/pdata/ptrace/ptracenudge => ../../pdata/ptrace/ptracenudge
+  #- go.opentelemetry.io/collector/pdata/pprofile/pprofilenudge => ../../pdata/pprofile/pprofilenudge
+  #- go.opentelemetry.io/collector/pdata/pmetric/pmetricnudge => ../../pdata/pmetric/pmetricnudge
