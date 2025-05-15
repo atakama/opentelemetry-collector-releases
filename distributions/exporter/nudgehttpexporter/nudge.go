@@ -195,6 +195,8 @@ var (
 const indexRawdata_MIN = -1
 
 var filename_N int = 0
+var serverHttpOnce sync.Once
+var metricsSystemOnce sync.Once
 
 type Mesure[T any] struct {
 	StartTime time.Time `json:"startTime"`
@@ -216,7 +218,6 @@ type Metrics struct {
 
 // Metriques systeme interne sans passer pas OTLP
 var metricsInterne Metrics = Metrics{}
-var once sync.Once
 
 // var configurationNudge *ini.File = nil
 type Float64Array []float64
@@ -255,7 +256,7 @@ func newExporter(cfg component.Config, set exporter.Settings) (*baseExporter, er
 	}
 
 	// Lancement du thread unique pour le CPU
-	once.Do(func() {
+	metricsSystemOnce.Do(func() {
 		go func(e *baseExporter) {
 			for {
 				metricsInterne.CPUUsage.StartTime = time.Now().UTC()
@@ -289,43 +290,60 @@ func (e *baseExporter) start(ctx context.Context, host component.Host) error {
 	port := e.config.DebugPort
 	path := e.config.DebugPath
 
-	go func() {
-		if port > 0 {
-			// Créer un NOUVEAU serveur HTTP pour le debug
-			mux := http.NewServeMux()
+	serverHttpOnce.Do(func() {
+		go func() {
+			if port > 0 {
+				// Créer un NOUVEAU serveur HTTP pour le debug
+				mux := http.NewServeMux()
 
-			// Charger le template depuis le fichier NudgeExporter.html
-			tmpl, err := template.ParseFiles("HTML/NudgeExporter.html")
-			if err != nil {
-				log.Fatalf("Erreur de parsing template : %v", err)
-			}
-
-			mux.HandleFunc(path+"/main", func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-				data := map[string]interface{}{
-					"Title":   "NudgeHttpExporter actif © Atakama-Technologies 2018-2025",
-					"TimeNow": time.Now().Format(time.RFC3339),
-					"CPU":     metricsInterne.CPUUsage.Value, // donnée CPU
+				// Charger le template depuis le fichier NudgeExporter.html
+				/*tmpl, err := template.ParseFiles("WWW/NudgeExporter.html")
+				if err != nil {
+					log.Fatalf("Erreur de parsing template : %v", err)
 				}
+				*/
 
-				if err := tmpl.Execute(w, data); err != nil {
-					http.Error(w, "Erreur serveur", http.StatusInternalServerError)
-					log.Println("Erreur template:", err)
+				// Sert les fichiers CSS/JS/images depuis le dossier ./files
+				// Le chemin d'accès doit être relatif au répertoire de travail actuel : otelcol.exe
+				dir := http.Dir("./WWW/files")
+				mux.Handle("/files/", http.StripPrefix("/files/", http.FileServer(dir)))
+
+				mux.HandleFunc(path+"/index.html", func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+					mapNudgeHTTPClientConfig_FieldsComments := extensionlinux.GetFieldsComments(e.config.NudgeHTTPClientConfig)
+
+					data := map[string]interface{}{
+						"Title":              "NudgeHttpExporter actif © Atakama-Technologies 2018-2025",
+						"TimeNow":            time.Now().Format(time.RFC3339),
+						"CPU":                metricsInterne.CPUUsage.Value, // donnée CPU
+						"Nudgehttp":          *e.config,
+						"Nudgehttp_Comments": mapNudgeHTTPClientConfig_FieldsComments,
+					}
+
+					tmpl, err := template.ParseFiles("WWW/NudgeExporter.html")
+					if err != nil {
+						log.Fatalf("Erreur de parsing template : %v", err)
+					}
+
+					if err := tmpl.Execute(w, data); err != nil {
+						http.Error(w, "Erreur serveur", http.StatusInternalServerError)
+						log.Println("Erreur template:", err)
+					}
+				})
+
+				addr := fmt.Sprintf("localhost:%d", port)
+				if err := http.ListenAndServe(addr, mux); err != nil {
+					e.logger.Error("Lancement du Serveur de page personnelles 'NudgeHttpExporter' a échoué", zap.Error(err))
+				} else {
+					e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' a démarré", zap.String("addr", addr))
+					e.logger.Info("Page personnelles 'NudgeHttpExporter' disponible sur", zap.String("url", fmt.Sprintf("http://localhost:%d"+path, port)))
 				}
-			})
-
-			addr := fmt.Sprintf("localhost:%d", port)
-			if err := http.ListenAndServe(addr, mux); err != nil {
-				e.logger.Error("Lancement du Serveur de page personnelles 'NudgeHttpExporter' a échoué", zap.Error(err))
 			} else {
-				e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' a démarré", zap.String("addr", addr))
-				e.logger.Info("Page personnelles 'NudgeHttpExporter' disponible sur", zap.String("url", fmt.Sprintf("http://localhost:%d"+path, port)))
+				e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' n'a pas démarré car le port est nul ou négatif")
 			}
-		} else {
-			e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' n'est pas démarré car le port est nul ou négatif")
-		}
-	}()
+		}()
+	})
 
 	return nil
 }
@@ -367,40 +385,42 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 
 	var error_ error = nil
 	for _, application_id := range application_ids {
-		languages, urlAppId := e.nudgeExporter.SendTransactions(application_id)
+		if application_id != "" {
+			languages, urlAppId := e.nudgeExporter.SendTransactions(application_id)
 
-		if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
-			fmt.Println(fmt.Sprintf("Transaction[%v] , language=%v , app_id=%v", len(e.nudgeExporter.Rawdata.Transactions), languages, application_id))
-		}
-
-		var err error = nil
-		var request []byte
-		switch e.config.Encoding {
-		case EncodingJSON:
-			request, err = e.nudgeExporter.MarshalJSON()
-		case EncodingProto:
-			request, err = e.nudgeExporter.MarshalProto()
-		default:
-			err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
-		}
-
-		if err != nil {
-			return consumererror.NewPermanent(err)
-		}
-
-		if e.nudgeExporter.Parent.RecordCollecte {
-			e.nudgeExporter.FlushRawdataToFileDisk(request)
-		}
-
-		if urlAppId != nil {
-			errX := e.export(ctx, *urlAppId, request, e.tracesPartialSuccessHandler)
-			if error_ == nil && errX != nil {
-				error_ = errX
+			if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
+				fmt.Println(fmt.Sprintf("Transaction[%v] , language=%v , app_id=%v", len(e.nudgeExporter.Rawdata.Transactions), languages, application_id))
 			}
-		} else {
-			errX := e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler)
-			if error_ == nil && errX != nil {
-				error_ = errX
+
+			var err error = nil
+			var request []byte
+			switch e.config.Encoding {
+			case EncodingJSON:
+				request, err = e.nudgeExporter.MarshalJSON()
+			case EncodingProto:
+				request, err = e.nudgeExporter.MarshalProto()
+			default:
+				err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+			}
+
+			if err != nil {
+				return consumererror.NewPermanent(err)
+			}
+
+			if e.nudgeExporter.Parent.RecordCollecte {
+				e.nudgeExporter.FlushRawdataToFileDisk(request)
+			}
+
+			if urlAppId != nil {
+				errX := e.export(ctx, *urlAppId, request, e.tracesPartialSuccessHandler)
+				if error_ == nil && errX != nil {
+					error_ = errX
+				}
+			} else {
+				errX := e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler)
+				if error_ == nil && errX != nil {
+					error_ = errX
+				}
 			}
 		}
 	}
@@ -810,11 +830,6 @@ func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportReq
 				//spanID := sps.SpanID().String()
 				attributes := sps.Attributes()
 
-				if v, b := attributes.Get(Nudge_application_id); b {
-					This.Transaction.TAG.ApplicationID = v.AsString()
-					This.Transaction.TAG.UrlAppId = This.Attributes2URL(This.Parent, attributes)
-				}
-
 				keys := GetKeys(attributes)
 				HTTP := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "http.") }) >= 0   //keys.findIndex(k => { return k.startsWith('http.'); }) >= 0;
 				NET := extensionlinux.FindIndex(keys, func(e string) bool { return extensionlinux.StartsWith(e, "net.") }) >= 0     //keys.findIndex(k => { return k.startsWith('net.'); }) >= 0;
@@ -851,6 +866,23 @@ func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportReq
 						s := time.Now().Format("2006-01-02 15:04:05")
 						This.Transaction.SessionId = extensionlinux.StringPtr(GetUuid(s).String())
 					}
+				}
+
+				if v, b := attributes.Get(Nudge_application_id); b {
+					if This.Transaction.TAG.ApplicationID == "" || This.Transaction.TAG.ApplicationID != v.AsString() {
+						This.Transaction.TAG.ApplicationID = v.AsString()
+						This.Transaction.TAG.UrlAppId = This.Attributes2URL(This.Parent, attributes)
+					} else {
+						// Normalement c'est une erreur dans le flux des attributs ou alors application_id n'a pas pu etre determiné par "attributes/add_app_id_java:"
+					}
+				} else if This.Transaction.TAG.ApplicationID == "" || This.Transaction.TAG.ApplicationID != This.Parent.NudgeHTTPClientConfig.AppID {
+					This.Transaction.TAG.ApplicationID = This.Parent.NudgeHTTPClientConfig.AppID
+					s, err := composeSignalURL(This.Parent, This.Parent.TracesEndpoint, This.Parent.NudgeHTTPClientConfig.PathCollect, This.Parent.NudgeHTTPClientConfig.AppID)
+					if err == nil {
+						This.Transaction.TAG.UrlAppId = extensionlinux.StringPtr(s)
+					}
+				} else {
+					// Normalement c'est une erreur dans le flux des attributs ou alors application_id n'a pas pu etre determiné par "attributes/add_app_id_java:"
 				}
 
 				/*
@@ -2336,7 +2368,7 @@ func (This *NudgeExporter) MarshalProto() ([]byte, error) {
 }
 
 func (This *NudgeExporter) Attributes2URL(cfg component.Config, attributes pcommon.Map) *string {
-	v, b := attributes.Get("nudge_application_id")
+	v, b := attributes.Get(Nudge_application_id)
 	if b {
 		oCfg := cfg.(*Config)
 		s, err := composeSignalURL(oCfg, oCfg.TracesEndpoint, oCfg.NudgeHTTPClientConfig.PathCollect, v.AsString()) //"traces", "v1")

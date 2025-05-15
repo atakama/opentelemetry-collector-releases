@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>{{.Title}}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!--<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">-->
+    <link rel="stylesheet" href="/files/NudgeExporter.css">
+    <meta name="description" content="NudgeHttpExporter - Statistiques et configuration">
+</head>
+<body>
+    <h2>{{.Title}} - {{.TimeNow}}</h2>
+    <h3>Statistiques de NudgeHttpExporter</h3>
+    <p>CPU: {{printf "%.2f" .CPU}}%</p>
+    <span>Configuration actuelle de NudgeHttpExporter</span>
+    <ul>
+        <li>Endpoint <span class="comment">{{.Nudgehttp_Comments.Endpoint}}</span> : {{.Nudgehttp.NudgeHTTPClientConfig.Endpoint}}</li>
+        <li>PathCollect <span class="comment">{{.Nudgehttp_Comments.PathCollect}}</span> : {{.Nudgehttp.PathCollect}}</li>
+        <li>Method <span class="comment">{{.Nudgehttp_Comments.Method}}</span> : {{.Nudgehttp.Method}}</li>
+        <li>Encoding <span class="comment">{{.Nudgehttp_Comments.Encoding}} : {{.Nudgehttp.Encoding}}</li>
+        <li>RecordCollecte <span class="comment">{{.Nudgehttp_Comments.RecordCollecte}}</span> : {{.Nudgehttp.RecordCollecte}}</li>
+        <li>TimeoutBufferTransaction <span class="comment">{{.Nudgehttp_Comments.TimeoutBufferTransaction}}</span>: {{.Nudgehttp.TimeoutBufferTransaction}}</li>
+        <li>ApplicationName <span class="comment">{{.Nudgehttp_Comments.ApplicationName}}</span>: {{.Nudgehttp.ApplicationName}}</li>
+        <li>InsertResource <span class="comment">{{.Nudgehttp_Comments.InsertResource}}</span>: {{.Nudgehttp.InsertResource}}</li>
+        <li>PrefixeServiceName <span class="comment">{{.Nudgehttp_Comments.PrefixeServiceName}}</span>: {{.Nudgehttp.PrefixeServiceName}}</li>
+        <li>SendUserConnectionString <span class="comment">{{.Nudgehttp_Comments.SendUserConnectionString}}</span>: {{.Nudgehttp.SendUserConnectionString}}</li>
+    </ul>
+    
+</body>
+</html>

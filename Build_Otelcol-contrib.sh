@@ -15,5 +15,5 @@ echo "🔧 Compilation du collecteur"
 go build -gcflags="all=-N -l" -o otelcol-contrib.exe
 cd ../../..
 echo "✅ Build terminé avec succès."
-cp -R ./distributions/exporter/nudgehttpexporter/HTML/ ./distributions/otelcol-contrib/_build/HTML/
-echo "✅ Copie du dossier HTML terminé avec succès."
+cp -R ./distributions/exporter/nudgehttpexporter/WWW/ ./distributions/otelcol-contrib/_build/
+echo "✅ Copie du dossier /WWW terminé avec succès."

@@ -63,23 +63,27 @@ type ConsoleX struct {
 
 // NudgeHTTPClientConfig étend confighttp.ClientConfig avec des champs personnalisés.
 type NudgeHTTPClientConfig struct {
-	confighttp.ClientConfig  `mapstructure:",squash"`
-	AppID                    string   `mapstructure:"app_id"`
-	PathCollect              string   `mapstructure:"pathCollect"`
-	Method                   string   `mapstructure:"method"`
-	NodeJS                   NodeJS   `mapstructure:"nodeJS"`
-	Console                  ConsoleX `mapstructure:"console"`
-	RecordCollecte           bool     `mapstructure:"recordCollecte"`
-	InsertResource           bool     `mapstructure:"insertResource"`
-	TimeoutBufferTransaction int64    `mapstructure:"timeoutBufferTransaction"`
-	ApplicationName          string   `mapstructure:"applicationName"`
-	PrefixeServiceName       string   `mapstructure:"prefixeServiceName"`
+	confighttp.ClientConfig `mapstructure:",squash"`
+	AppID                   string   `mapstructure:"app_id" comment:"Il est possible de laisser la valeur par defaut si non définie dans la partie processor"`
+	PathCollect             string   `mapstructure:"pathCollect" comment:"chemin de la requete http, par defaut /collect/rawdata"`
+	Method                  string   `mapstructure:"method" comment:"methode http pour le flush des rawdatas"`
+	NodeJS                  NodeJS   `mapstructure:"nodeJS" comment:"Configuration pour NodeJS"`
+	Console                 ConsoleX `mapstructure:"console" comment:"Configuration pour ConsoleX"`
+	// The level of telemetry to be sent to the Nudge server.
+	RecordCollecte           bool     `mapstructure:"recordCollecte" comment:"Enregistrement du rawdata brut sur disque"`
+	InsertResource           bool     `mapstructure:"insertResource" comment:"Insertion des métriques resources du poste ou est situé le collecteur OTLP (disque, memoire, cpu)"`
+	TimeoutBufferTransaction int64    `mapstructure:"timeoutBufferTransaction" comment:"Timeout du Buffer Transaction en secondes"`
+	ApplicationName          string   `mapstructure:"applicationName" comment:"Nom de l'application et du serveur, inseré dans le rawdata, par defaut APP_CCC"`
+	PrefixeServiceName       string   `mapstructure:"prefixeServiceName" comment:"Prefixe du nom de service, par defaut APP_CCC"`
 	FilterHeader             []string `mapstructure:"filterHeader"`
 	SessionId                string   `mapstructure:"sessionId"`
-	SendUserConnectionString bool     `mapstructure:"sendUserConnectionString"`
-	RefreshScanDrives        float64  `mapstructure:"refreshScanDrives"`
-	RefreshLoadCPU           float64  `mapstructure:"refreshLoadCPU"`
-	WaitEndService           bool     `mapstructure:"waitEndService"`
+	SendUserConnectionString bool     `mapstructure:"sendUserConnectionString" comment:"Envoi de la connection string de l'utilisateur"`
+	RefreshScanDrives        float64  `mapstructure:"refreshScanDrives" comment:"Temps en minutes de rafraichissement des lecteurs physiques & logiques (CF : Worker.js), par defaut 10"`
+	RefreshLoadCPU           float64  `mapstructure:"refreshLoadCPU" comment:"Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s"`
+	WaitEndService           bool     `mapstructure:"waitEndService" comment:"Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vers le rawdata, par defaut true`
+	DebugPort                int      `mapstructure:"debugPort"`
+	DebugPath                string   `mapstructure:"debugPath"`
+	// The level of telemetry to be sent to the Nudge server.
 }
 
 func NewDefaultNudgeHTTPClientConfig() NudgeHTTPClientConfig {

@@ -71,9 +71,9 @@ exporters:
     method: PUT
     # encodage du rawadata. proto, json
     encoding: proto # -> application/x-protobuf
-    # chemin de la requette http des pages personnelles de NudgeExorter
+    # chemin de la requette http des pages personnelles de NudgeExporter
     debug_path: /debug/NudgeExporter
-    # Port de page personnelle de NudgeExorter
+    # Port de page personnelle de NudgeExporter
     debug_port: 15682
     # Enregistrement du rawdata brut sur disque
     recordCollecte: true
@@ -109,17 +109,17 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, attributes/add_app_id_java, attributes/add_app_id_node, batch]
       #processors: [memory_limiter, batch]
-      exporters: [nudgehttp, nudgedebug]
+      exporters: [nudgehttp] #, nudgedebug]
     metrics:
       receivers: [otlp]
       # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
       processors: [memory_limiter, batch]
-      exporters: [nudgehttp, nudgedebug]
+      exporters: [nudgehttp] #, nudgedebug]
     logs:
       receivers: [otlp]
       # processors: [memory_limiter, add_app_id_java, add_app_id_node, batch]
       processors: [memory_limiter, batch]
-      exporters: [nudgehttp, nudgedebug]
+      exporters: [nudgehttp] #, nudgedebug]
 
   # zpages:
   # http://127.0.0.1:15680/debug/servicez
