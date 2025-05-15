@@ -1,9 +1,9 @@
 extensions:
   health_check:
+    endpoint: "0.0.0.0:13133"  # Par défaut
   pprof:
     endpoint: 0.0.0.0:1777
   zpages:
-    # http://127.0.0.1:15680/debug/servicez
     endpoint: localhost:15680
 
 receivers:
@@ -32,6 +32,7 @@ processors:
         key: nudge_application_id
         value: 95776b60-b22d-4b95-801b-4137a6ee1f98
     include:
+      # strict ou regexp
       match_type: strict
       # attributes ou resources
       resources:
@@ -47,6 +48,7 @@ processors:
         key: nudge_application_id
         value: be6abaf9-ba97-4483-b502-24110c805270
     include:
+      # strict ou regexp
       match_type: strict
       # attributes ou resources
       resources:
@@ -59,6 +61,7 @@ exporters:
   nudgedebug:
     verbosity: Detailed
   nudgehttp:
+    # endpoint de Nudge
     endpoint: https://ph-apm.dev.atakama-technologies.com
     # Il est possible de laisser la valeur par defaut si non définie dans la partie processor
     app_id: 00000000-0000-0000-0000-000000000000
@@ -68,6 +71,10 @@ exporters:
     method: PUT
     # encodage du rawadata. proto, json
     encoding: proto # -> application/x-protobuf
+    # chemin de la requette http des pages personnelles de NudgeExorter
+    debug_path: /debug/NudgeExporter
+    # Port de page personnelle de NudgeExorter
+    debug_port: 15682
     # Enregistrement du rawdata brut sur disque
     recordCollecte: true
     # Insertion des métriques resources (disque, memoire, cpu)
@@ -84,7 +91,7 @@ exporters:
     refreshScanDrives: 60
     # Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s
     refreshLoadCPU: 30
-    # Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vrs le rawdata, par defaut true
+    # Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vers le rawdata, par defaut true
     waitEndService: true
     nodeJS:
       # Fonction inconnue
@@ -114,6 +121,25 @@ service:
       processors: [memory_limiter, batch]
       exporters: [nudgehttp, nudgedebug]
 
+  # zpages:
   # http://127.0.0.1:15680/debug/servicez
   # http://127.0.0.1:15680/debug/tracez
+  # http://localhost:15680/debug/pipelinez
+  # http://localhost:15680/debug/extensionz
+  # http://localhost:15680/debug/featurez
+  # http://localhost:15680/debug/expvarz
+  # pprof:
+  # http://localhost:1777/debug/pprof/
+  # http://localhost:1777/debug/pprof/heap
+  # http://localhost:1777/debug/pprof/profile
+  # http://localhost:1777/debug/pprof/goroutine
+  # http://localhost:1777/debug/pprof/threadcreate
+  # http://localhost:1777/debug/pprof/block
+  # http://localhost:1777/debug/pprof/cmdline
+  # http://localhost:1777/debug/pprof/symbol
+  # http://localhost:1777/debug/pprof/trace
+  # http://localhost:1777/debug/pprof/trace?seconds=5
+  # http://localhost:1777/debug/pprof/trace?seconds=5&debug=1
+  # health_check:
+  # http://localhost:13133
   extensions: [health_check, pprof, zpages]

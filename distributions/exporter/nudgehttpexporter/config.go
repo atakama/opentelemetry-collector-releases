@@ -110,6 +110,11 @@ type Config struct {
 
 	// The encoding to export telemetry (default: "proto")
 	Encoding EncodingType `mapstructure:"encoding"`
+
+	// Chemin Page personnelle de Nudge
+	DebugPath string `mapstructure:"debug_path"`
+	// Port Page personnelle de Nudge
+	DebugPort int `mapstructure:"debug_port"`
 }
 
 var _ component.Config = (*Config)(nil)

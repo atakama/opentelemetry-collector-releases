@@ -8,12 +8,12 @@
 
 set -e  # Stop on first error
 
-echo "📦 Generation de code GOLANG dans : distributions/otelcol/_build"
-make build DISTRIBUTIONS=otelcol OTELCOL_BUILDER=/c/Users/frederic1/bin/ocb.exe OTELCOL_BUILDER_ARGS=--skip-compilation
-cd distributions/otelcol/_build
+echo "📦 Generation de code GOLANG dans : distributions/otelcol-contrib/_build"
+make build DISTRIBUTIONS=otelcol-contrib OTELCOL_BUILDER=/c/Users/frederic1/bin/ocb.exe OTELCOL_BUILDER_ARGS=--skip-compilation
+cd distributions/otelcol-contrib/_build
 echo "🔧 Compilation du collecteur"
-go build -gcflags="all=-N -l" -o otelcol.exe
+go build -gcflags="all=-N -l" -o otelcol-contrib.exe
 cd ../../..
 echo "✅ Build terminé avec succès."
-cp -R ./distributions/exporter/nudgehttpexporter/HTML/ ./distributions/otelcol/_build/HTML/
+cp -R ./distributions/exporter/nudgehttpexporter/HTML/ ./distributions/otelcol-contrib/_build/HTML/
 echo "✅ Copie du dossier HTML terminé avec succès."

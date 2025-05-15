@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
+	"log"
 	"math/big"
 	mySystem "mySystem"
 	"net"
@@ -283,6 +285,48 @@ func (e *baseExporter) start(ctx context.Context, host component.Host) error {
 		}
 	*/
 	e.client = client
+
+	port := e.config.DebugPort
+	path := e.config.DebugPath
+
+	go func() {
+		if port > 0 {
+			// Créer un NOUVEAU serveur HTTP pour le debug
+			mux := http.NewServeMux()
+
+			// Charger le template depuis le fichier NudgeExporter.html
+			tmpl, err := template.ParseFiles("HTML/NudgeExporter.html")
+			if err != nil {
+				log.Fatalf("Erreur de parsing template : %v", err)
+			}
+
+			mux.HandleFunc(path+"/main", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+				data := map[string]interface{}{
+					"Title":   "NudgeHttpExporter actif © Atakama-Technologies 2018-2025",
+					"TimeNow": time.Now().Format(time.RFC3339),
+					"CPU":     metricsInterne.CPUUsage.Value, // donnée CPU
+				}
+
+				if err := tmpl.Execute(w, data); err != nil {
+					http.Error(w, "Erreur serveur", http.StatusInternalServerError)
+					log.Println("Erreur template:", err)
+				}
+			})
+
+			addr := fmt.Sprintf("localhost:%d", port)
+			if err := http.ListenAndServe(addr, mux); err != nil {
+				e.logger.Error("Lancement du Serveur de page personnelles 'NudgeHttpExporter' a échoué", zap.Error(err))
+			} else {
+				e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' a démarré", zap.String("addr", addr))
+				e.logger.Info("Page personnelles 'NudgeHttpExporter' disponible sur", zap.String("url", fmt.Sprintf("http://localhost:%d"+path, port)))
+			}
+		} else {
+			e.logger.Info("Le Serveur de page personnelles 'NudgeHttpExporter' n'est pas démarré car le port est nul ou négatif")
+		}
+	}()
+
 	return nil
 }
 
@@ -766,7 +810,7 @@ func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportReq
 				//spanID := sps.SpanID().String()
 				attributes := sps.Attributes()
 
-				if v, b := attributes.Get("application_id"); b {
+				if v, b := attributes.Get(Nudge_application_id); b {
 					This.Transaction.TAG.ApplicationID = v.AsString()
 					This.Transaction.TAG.UrlAppId = This.Attributes2URL(This.Parent, attributes)
 				}

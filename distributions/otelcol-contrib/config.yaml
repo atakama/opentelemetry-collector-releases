@@ -1,5 +1,6 @@
 extensions:
   health_check:
+    endpoint: "0.0.0.0:13133"  # Par défaut
   pprof:
     endpoint: 0.0.0.0:1777
   zpages:
@@ -59,7 +60,10 @@ exporters:
   nudgedebug:
     verbosity: Detailed
   nudgehttp:
+    # endpoint de Nudge
     endpoint: https://ph-apm.dev.atakama-technologies.com
+    # Port de la page personnelle debug de Nudge
+    debug_port: 15700
     # Il est possible de laisser la valeur par defaut si non définie dans la partie processor
     app_id: 00000000-0000-0000-0000-000000000000
     # chemin de la requete http, par defaut /collect/rawdata
@@ -114,6 +118,24 @@ service:
       processors: [memory_limiter, batch]
       exporters: [nudgehttp, nudgedebug]
 
+  # zpages:
   # http://127.0.0.1:15680/debug/servicez
   # http://127.0.0.1:15680/debug/tracez
+  # http://localhost:15680/debug/pipelinez
+  # http://localhost:15680/debug/extensionz
+  # http://localhost:15680/debug/featurez
+  # pprof:
+  # http://localhost:1777/debug/pprof/
+  # http://localhost:1777/debug/pprof/heap
+  # http://localhost:1777/debug/pprof/profile
+  # http://localhost:1777/debug/pprof/goroutine
+  # http://localhost:1777/debug/pprof/threadcreate
+  # http://localhost:1777/debug/pprof/block
+  # http://localhost:1777/debug/pprof/cmdline
+  # http://localhost:1777/debug/pprof/symbol
+  # http://localhost:1777/debug/pprof/trace
+  # http://localhost:1777/debug/pprof/trace?seconds=5
+  # http://localhost:1777/debug/pprof/trace?seconds=5&debug=1
+  # health_check:
+  # http://localhost:13133
   extensions: [health_check, pprof, zpages]
