@@ -99,8 +99,13 @@ require (
 replace (
 	extensionlinux => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\ExtensionLinux
 	mySystem => C:\Users\frederic1\Documents\DEVELOPPEMENT_GOLANG_BIBLIOTHEQUE\mySystem
-	go.opentelemetry.io/collector/pdata v0.1.0 => ../../pdata
-	go.opentelemetry.io/collector/pdata/pprofile v0.1.0 => ../../pdata/pprofile
+	go.opentelemetry.io/collector/pdata => ../../pdata
+	go.opentelemetry.io/collector/pdata/pprofile => ../../pdata/pprofile
+	go.opentelemetry.io/collector/pdata/plog/plognudge => ../../pdata/plog/plognudge
+	go.opentelemetry.io/collector/pdata/ptrace/ptracenudge => ../../pdata/ptrace/ptracenudge
+	go.opentelemetry.io/collector/pdata/pmetric/pmetricnudge => ../../pdata/pmetric/pmetricnudge
+	go.opentelemetry.io/collector/pdata/ptrace => ../../pdata/ptrace
+	go.opentelemetry.io/collector/pdata/plog => ../../pdata/plog
 )
 
 retract (

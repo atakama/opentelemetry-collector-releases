@@ -35,7 +35,7 @@ processors:
       # de l'application, par defaut java
       - action: insert
         key: nudge_application_statistique_name
-        value: java, petcinic
+        value: java, petclinic
     include:
       # strict ou regexp
       match_type: strict

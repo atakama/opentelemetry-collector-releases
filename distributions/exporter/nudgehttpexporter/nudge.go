@@ -320,12 +320,27 @@ func (e *baseExporter) start(ctx context.Context, host component.Host) error {
 
 					mapNudgeHTTPClientConfig_FieldsComments := extensionlinux.GetFieldsComments(e.config.NudgeHTTPClientConfig)
 
+					stats := map[string]interface{}{}
+					for _, e := range metricsInterne.NCmpt {
+						stats[e.Name] = map[string]interface{}{
+							"startTime":   e.StartTime.Format(time.RFC3339),
+							"endTime":     e.EndTime.Format(time.RFC3339),
+							"value":       e.Value,
+							"values":      e.Values,
+							"name":        e.Name,
+							"identifiant": e.Identifiant,
+							"unit":        e.Unit,
+							"comment":     e.Comment,
+						}
+					}
+
 					data := map[string]interface{}{
 						"Title":              "NudgeHttpExporter actif © Atakama-Technologies 2018-2025",
 						"TimeNow":            time.Now().Format(time.RFC3339),
 						"CPU":                metricsInterne.CPUUsage.Value, // donnée CPU
 						"Nudgehttp":          *e.config,
 						"Nudgehttp_Comments": mapNudgeHTTPClientConfig_FieldsComments,
+						"Stats":              stats,
 					}
 
 					tmpl, err := template.ParseFiles("WWW/NudgeExporter.html")
@@ -394,27 +409,7 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 	for _, application_id := range application_ids {
 		if application_id != "" {
 
-			languages, urlAppId := e.nudgeExporter.SendTransactions(application_id)
-
-			// Comptage
-			metricInterne, i := extensionlinux.Find(metricsInterne.NCmpt, func(e *Mesure[float64]) bool {
-				return e.Identifiant == application_id
-			})
-			if i < 0 {
-				metricsInterne.NCmpt = append(metricsInterne.NCmpt, &Mesure[float64]{
-					StartTime:   time.Now().UTC(),
-					EndTime:     time.Now().UTC(),
-					Value:       float64(len(e.nudgeExporter.Rawdata.Transactions)),
-					Name:        e.nudgeExporter.Rawdata.Transactions[0].TAG.Nudge_application_statistique_name,
-					Unit:        "transactions",
-					Comment:     "Nombre de transactions envoyées",
-					Identifiant: application_id,
-				})
-			} else {
-				//metricInterne.StartTime = time.Now().UTC()
-				metricInterne.EndTime = time.Now().UTC()
-				metricInterne.Value += float64(len(e.nudgeExporter.Rawdata.Transactions))
-			}
+			languages, urlAppId, tsNudge := e.nudgeExporter.SendTransactions(application_id)
 
 			if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
 				fmt.Println(fmt.Sprintf("Transaction[%v] , language=%v , app_id=%v", len(e.nudgeExporter.Rawdata.Transactions), languages, application_id))
@@ -429,6 +424,28 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 				request, err = e.nudgeExporter.MarshalProto()
 			default:
 				err = fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
+			}
+
+			// Comptage
+			metricInterne, i := extensionlinux.Find(metricsInterne.NCmpt, func(e *Mesure[float64]) bool {
+				return e.Identifiant == application_id
+			})
+			if i < 0 {
+				metricsInterne.NCmpt = append(metricsInterne.NCmpt, &Mesure[float64]{
+					StartTime:   time.Now().UTC(),
+					EndTime:     time.Now().UTC(),
+					Value:       float64(len(tsNudge)),
+					Values:      []float64{float64(len(request)), 0, 0, 0, 0, 0, 0, 0},
+					Name:        tsNudge[0].TAG.StatistiqueName,
+					Unit:        "transactions",
+					Comment:     "Nombre de transactions envoyées",
+					Identifiant: application_id,
+				})
+			} else {
+				//metricInterne.StartTime = time.Now().UTC()
+				metricInterne.EndTime = time.Now().UTC()
+				metricInterne.Value += float64(len(e.nudgeExporter.Rawdata.Transactions))
+				metricInterne.Values[0] += float64(len(request))
 			}
 
 			if err != nil {
@@ -2454,6 +2471,7 @@ func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string, [
 	k := len(This.Transactions)
 	languages := make([]string, 0)
 	var urlAppId *string = nil
+	ts := make([]*TransactionNudge, 0)
 	for i := 0; i < len(This.Transactions); i++ {
 		t := This.Transactions[i]
 
@@ -2467,6 +2485,7 @@ func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string, [
 			if slices.Contains([]uint32{0, 2}, t.TAG.Urlid) {
 				if slices.Contains([]uint32{0}, t.TAG.Urlid) {
 					This.Rawdata.Transactions = append(This.Rawdata.Transactions, t.Transaction)
+					ts = append(ts, t)
 					languages = extensionlinux.AppendUnique(languages, t.TAG.Language)
 					if app_id != "" && urlAppId == nil {
 						urlAppId = t.TAG.UrlAppId
@@ -2484,6 +2503,7 @@ func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string, [
 					}
 
 					This.Rawdata.Transactions = append(This.Rawdata.Transactions, t.Transaction)
+					ts = append(ts, t)
 					languages = extensionlinux.AppendUnique(languages, t.TAG.Language)
 					if app_id != "" && urlAppId == nil {
 						urlAppId = t.TAG.UrlAppId
@@ -2502,7 +2522,7 @@ func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string, [
 
 	This.Transaction = nil
 
-	return languages, urlAppId, This.Rawdata.Transactions
+	return languages, urlAppId, ts
 }
 
 func BuildPathCollect(dateStr string, filenameN int) string {

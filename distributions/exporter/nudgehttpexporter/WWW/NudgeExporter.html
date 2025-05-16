@@ -29,20 +29,26 @@
     <table>
         <caption>Statistiques de NudgeHttpExporter</caption>
         <colgroup>
-            <col style="width: 80%;">
+            <col style="width: 20%;">
+            <col style="width: 40%;">
+            <col style="width: 20%;">
             <col style="width: 20%;">
         </colgroup>
         <thead>
             <tr>
                 <th>Statistiques</th>
-                <th>Valeur</th>
+                <th>Application ID de Nudge</th>
+                <th>Transactions</th>
+                <th>Taille</th>
             </tr>
         </thead>
         <tbody>
-            {{range $key, $value := .Nudgehttp.Stats}}
+            {{range $key, $value := .Stats}}
             <tr>
                 <td title="{{$value.comment}}">{{$key}}</td>
+                <td title="{{$value.comment}}">{{$value.identifiant}}</td>
                 <td>{{$value.value}}</td>
+                <td>{{$values[0]}}</td>
             </tr>
             {{end}}
         </tbody>
