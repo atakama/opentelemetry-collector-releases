@@ -199,14 +199,15 @@ var serverHttpOnce sync.Once
 var metricsSystemOnce sync.Once
 
 type Mesure[T any] struct {
-	StartTime   time.Time `json:"startTime"`
-	EndTime     time.Time `json:"endTime"`
-	Values      []T       `json:"values"`
-	Value       T         `json:"value"`
-	Name        string    `json:"name" comment:"Nom de la mesure"`
-	Identifiant string    `json:"identifiant" comment:"Identifiant de la mesure"`
-	Unit        string    `json:"unit" comment:"Unité de la mesure"`
-	Comment     string    `json:"comment" comment:"Commentaire de la mesure"`
+	StartTime   time.Time              `json:"startTime" comment:"Debut de la mesure"`
+	EndTime     time.Time              `json:"endTime" comment:"Fin de la mesure"`
+	Values      []T                    `json:"values" comment:"Liste de mesures"`
+	Value       T                      `json:"value" comment:"Mesure"`
+	Name        string                 `json:"name" comment:"Nom de la mesure"`
+	Map         map[string]interface{} `json:"map" comment:"Dictionnaire de valeurs"`
+	Identifiant string                 `json:"identifiant" comment:"Identifiant de la mesure"`
+	Unit        string                 `json:"unit" comment:"Unité de la mesure"`
+	Comment     string                 `json:"comment" comment:"Commentaire de la mesure"`
 }
 
 type Metrics struct {
@@ -220,7 +221,10 @@ type Metrics struct {
 	//NetworkUsage Mesure[int64] `json:"networkUsage"`
 
 	// Metrique de comptage des rawdata
-	NCmpt []*Mesure[float64] `json:"ncmpt"`
+	NCmpt_Traces  []*Mesure[float64] `json:"ncmpt" comment:"Listes de metriques"`
+	NCmpt_Metrics []*Mesure[float64] `json:"ncmpt" comment:"Listes de metriques"`
+	NTraces       int                `json:"ntraces" comment:"Nombre de 'traces'"`
+	NMetrics      int                `json:"nmetrics" comment:"Nombre de 'metrics'"`
 }
 
 // Metriques systeme interne sans passer pas OTLP
@@ -320,13 +324,14 @@ func (e *baseExporter) start(ctx context.Context, host component.Host) error {
 
 					mapNudgeHTTPClientConfig_FieldsComments := extensionlinux.GetFieldsComments(e.config.NudgeHTTPClientConfig)
 
-					stats := map[string]interface{}{}
-					for _, e := range metricsInterne.NCmpt {
-						stats[e.Name] = map[string]interface{}{
+					stats_Traces := map[string]interface{}{}
+					for _, e := range metricsInterne.NCmpt_Traces {
+						stats_Traces[e.Name] = map[string]interface{}{
 							"startTime":   e.StartTime.Format(time.RFC3339),
 							"endTime":     e.EndTime.Format(time.RFC3339),
 							"value":       e.Value,
 							"values":      e.Values,
+							"map":         e.Map,
 							"name":        e.Name,
 							"identifiant": e.Identifiant,
 							"unit":        e.Unit,
@@ -340,7 +345,7 @@ func (e *baseExporter) start(ctx context.Context, host component.Host) error {
 						"CPU":                metricsInterne.CPUUsage.Value, // donnée CPU
 						"Nudgehttp":          *e.config,
 						"Nudgehttp_Comments": mapNudgeHTTPClientConfig_FieldsComments,
-						"Stats":              stats,
+						"Stats_traces":       stats_Traces,
 					}
 
 					tmpl, err := template.ParseFiles("WWW/NudgeExporter.html")
@@ -427,15 +432,21 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 			}
 
 			// Comptage
-			metricInterne, i := extensionlinux.Find(metricsInterne.NCmpt, func(e *Mesure[float64]) bool {
+			metricInterne, i := extensionlinux.Find(metricsInterne.NCmpt_Traces, func(e *Mesure[float64]) bool {
 				return e.Identifiant == application_id
 			})
 			if i < 0 {
-				metricsInterne.NCmpt = append(metricsInterne.NCmpt, &Mesure[float64]{
-					StartTime:   time.Now().UTC(),
-					EndTime:     time.Now().UTC(),
-					Value:       float64(len(tsNudge)),
-					Values:      []float64{float64(len(request)), 0, 0, 0, 0, 0, 0, 0},
+				metricsInterne.NCmpt_Traces = append(metricsInterne.NCmpt_Traces, &Mesure[float64]{
+					StartTime: time.Now().UTC(),
+					EndTime:   time.Now().UTC(),
+					Value:     float64(len(tsNudge)),
+					Values:    []float64{float64(len(request)), 0, 0, 0, 0, 0, 0, 0},
+					Map: map[string]interface{}{
+						"ntraces":  int(0),
+						"duration": int(0),
+						"success":  int(0),
+						"error":    int(0),
+					},
 					Name:        tsNudge[0].TAG.StatistiqueName,
 					Unit:        "transactions",
 					Comment:     "Nombre de transactions envoyées",
@@ -457,12 +468,12 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 			}
 
 			if urlAppId != nil {
-				errX := e.export(ctx, *urlAppId, request, e.tracesPartialSuccessHandler)
+				errX := e.export(ctx, *urlAppId, request, e.tracesPartialSuccessHandler, metricInterne)
 				if error_ == nil && errX != nil {
 					error_ = errX
 				}
 			} else {
-				errX := e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler)
+				errX := e.export(ctx, e.tracesURL, request, e.tracesPartialSuccessHandler, metricInterne)
 				if error_ == nil && errX != nil {
 					error_ = errX
 				}
@@ -1942,7 +1953,7 @@ func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) erro
 	if err != nil {
 		return consumererror.NewPermanent(err)
 	}
-	return e.export(ctx, e.metricsURL, request, e.metricsPartialSuccessHandler)
+	return e.export(ctx, e.metricsURL, request, e.metricsPartialSuccessHandler, nil)
 }
 
 func (This *NudgeExporter) MetricsExportRequest2Rawdata(tr *pmetricnudge.ExportRequest) {
@@ -1974,7 +1985,7 @@ func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
 		return consumererror.NewPermanent(err)
 	}
 
-	return e.export(ctx, e.logsURL, request, e.logsPartialSuccessHandler)
+	return e.export(ctx, e.logsURL, request, e.logsPartialSuccessHandler, nil)
 }
 
 func (This *NudgeExporter) LogsExportRequest2Rawdata(tr *plognudge.ExportRequest) {
@@ -2006,14 +2017,14 @@ func (e *baseExporter) pushProfiles(ctx context.Context, td pprofile.Profiles) e
 		return consumererror.NewPermanent(err)
 	}
 
-	return e.export(ctx, e.profilesURL, request, e.profilesPartialSuccessHandler)
+	return e.export(ctx, e.profilesURL, request, e.profilesPartialSuccessHandler, nil)
 }
 
 func (This *NudgeExporter) ProfilesExportRequest2Rawdata(tr *pprofilenudge.ExportRequest) {
 
 }
 
-func (e *baseExporter) export(ctx context.Context, url string, request []byte, partialSuccessHandler partialSuccessHandler) error {
+func (e *baseExporter) export(ctx context.Context, url string, request []byte, partialSuccessHandler partialSuccessHandler, mInterne *Mesure[float64]) error {
 	// Met à nil le pointeur car flush des rawdata
 	e.nudgeExporter.Rawdata = nil
 
@@ -2035,8 +2046,23 @@ func (e *baseExporter) export(ctx context.Context, url string, request []byte, p
 	}
 
 	req.Header.Set("User-Agent", e.userAgent)
+	if mInterne != nil {
+		mInterne.Map["ntraces"] = mInterne.Map["ntraces"].(int) + 1
+	}
 
+	start := time.Now() // Démarrer le chrono
 	resp, err := e.client.Do(req)
+	duration := time.Since(start) // Mesurer la durée
+
+	if mInterne != nil {
+		mInterne.Map["duration"] = mInterne.Map["duration"].(int) + int(duration.Milliseconds())
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			mInterne.Map["success"] = mInterne.Map["success"].(int) + 1
+		} else {
+			mInterne.Map["error"] = mInterne.Map["error"].(int) + 1
+		}
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to make an HTTP request: %w", err)
 	}

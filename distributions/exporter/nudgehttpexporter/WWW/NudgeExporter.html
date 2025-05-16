@@ -26,33 +26,69 @@
         <li>SendUserConnectionString <span class="comment">{{.Nudgehttp_Comments.SendUserConnectionString}}</span>: {{.Nudgehttp.SendUserConnectionString}}</li>
     </ul>
         <br/>
-    <table>
-        <caption>Statistiques de NudgeHttpExporter</caption>
+    <table id="traces">
+        <caption>Statistiques de NudgeHttpExporter Traces</caption>
         <colgroup>
             <col style="width: 20%;">
             <col style="width: 40%;">
+            <col style="width: 10%;">
+            <col style="width: 10%;">
+            <col style="width: 10%;">
+            <col style="width: 10%;">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>Statistiques</th>
+                <th>Application ID de Nudge</th>
+                <th>Rawdata</th>
+                <th>Transactions</th>
+                <th>Taille</th>
+                <th>Durée</th>
+                <th>Succés</th>
+                <th>Erreur</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $key, $value := .Stats_traces}}
+            <tr>
+                <td title="{{$value.comment}}">{{$key}}</td>
+                <td title="{{$value.comment}}">{{$value.identifiant}}</td>
+                <td>{{index $value.map "ntraces"}}</td>
+                <td>{{$value.value}}</td>
+                <td class="format-nombre" data-value="{{index $value.values 0}}"></td>
+                <td>{{index $value.map "duration"}} ms</td>
+                <td>{{index $value.map "success"}}</td>
+                <td>{{index $value.map "error"}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    <br/>
+    <table id="metrics">
+        <caption>Statistiques de NudgeHttpExporter Metrics</caption>
+        <colgroup>
             <col style="width: 20%;">
+            <col style="width: 60%;">
             <col style="width: 20%;">
         </colgroup>
         <thead>
             <tr>
                 <th>Statistiques</th>
                 <th>Application ID de Nudge</th>
-                <th>Transactions</th>
                 <th>Taille</th>
             </tr>
         </thead>
         <tbody>
-            {{range $key, $value := .Stats}}
+            {{range $key, $value := .Stats_metrics}}
             <tr>
                 <td title="{{$value.comment}}">{{$key}}</td>
                 <td title="{{$value.comment}}">{{$value.identifiant}}</td>
-                <td>{{$value.value}}</td>
                 <td class="format-nombre" data-value="{{index $value.values 0}}"></td>
             </tr>
             {{end}}
         </tbody>
     </table>
+
 </body>
 <script>
     const observer = new MutationObserver(mutations => {
