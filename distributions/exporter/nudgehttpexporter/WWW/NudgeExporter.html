@@ -17,7 +17,7 @@
         <li>Endpoint <span class="comment">{{.Nudgehttp_Comments.Endpoint}}</span> : {{.Nudgehttp.NudgeHTTPClientConfig.Endpoint}}</li>
         <li>PathCollect <span class="comment">{{.Nudgehttp_Comments.PathCollect}}</span> : {{.Nudgehttp.PathCollect}}</li>
         <li>Method <span class="comment">{{.Nudgehttp_Comments.Method}}</span> : {{.Nudgehttp.Method}}</li>
-        <li>Encoding <span class="comment">{{.Nudgehttp_Comments.Encoding}} : {{.Nudgehttp.Encoding}}</li>
+        <li>Encoding <span class="comment">{{.Nudgehttp_Comments.Encoding}}</span> : {{.Nudgehttp.Encoding}}</li>
         <li>RecordCollecte <span class="comment">{{.Nudgehttp_Comments.RecordCollecte}}</span> : {{.Nudgehttp.RecordCollecte}}</li>
         <li>TimeoutBufferTransaction <span class="comment">{{.Nudgehttp_Comments.TimeoutBufferTransaction}}</span>: {{.Nudgehttp.TimeoutBufferTransaction}}</li>
         <li>ApplicationName <span class="comment">{{.Nudgehttp_Comments.ApplicationName}}</span>: {{.Nudgehttp.ApplicationName}}</li>
@@ -25,6 +25,27 @@
         <li>PrefixeServiceName <span class="comment">{{.Nudgehttp_Comments.PrefixeServiceName}}</span>: {{.Nudgehttp.PrefixeServiceName}}</li>
         <li>SendUserConnectionString <span class="comment">{{.Nudgehttp_Comments.SendUserConnectionString}}</span>: {{.Nudgehttp.SendUserConnectionString}}</li>
     </ul>
-    
+        <br/>
+    <table>
+        <caption>Statistiques de NudgeHttpExporter</caption>
+        <colgroup>
+            <col style="width: 80%;">
+            <col style="width: 20%;">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>Statistiques</th>
+                <th>Valeur</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range $key, $value := .Nudgehttp.Stats}}
+            <tr>
+                <td title="{{$value.comment}}">{{$key}}</td>
+                <td>{{$value.value}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
 </body>
 </html>

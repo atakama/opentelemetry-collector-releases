@@ -70,19 +70,20 @@ type NudgeHTTPClientConfig struct {
 	NodeJS                  NodeJS   `mapstructure:"nodeJS" comment:"Configuration pour NodeJS"`
 	Console                 ConsoleX `mapstructure:"console" comment:"Configuration pour ConsoleX"`
 	// The level of telemetry to be sent to the Nudge server.
-	RecordCollecte           bool     `mapstructure:"recordCollecte" comment:"Enregistrement du rawdata brut sur disque"`
-	InsertResource           bool     `mapstructure:"insertResource" comment:"Insertion des métriques resources du poste ou est situé le collecteur OTLP (disque, memoire, cpu)"`
-	TimeoutBufferTransaction int64    `mapstructure:"timeoutBufferTransaction" comment:"Timeout du Buffer Transaction en secondes"`
-	ApplicationName          string   `mapstructure:"applicationName" comment:"Nom de l'application et du serveur, inseré dans le rawdata, par defaut APP_CCC"`
-	PrefixeServiceName       string   `mapstructure:"prefixeServiceName" comment:"Prefixe du nom de service, par defaut APP_CCC"`
-	FilterHeader             []string `mapstructure:"filterHeader"`
-	SessionId                string   `mapstructure:"sessionId"`
-	SendUserConnectionString bool     `mapstructure:"sendUserConnectionString" comment:"Envoi de la connection string de l'utilisateur"`
-	RefreshScanDrives        float64  `mapstructure:"refreshScanDrives" comment:"Temps en minutes de rafraichissement des lecteurs physiques & logiques (CF : Worker.js), par defaut 10"`
-	RefreshLoadCPU           float64  `mapstructure:"refreshLoadCPU" comment:"Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s"`
-	WaitEndService           bool     `mapstructure:"waitEndService" comment:"Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vers le rawdata, par defaut true`
-	DebugPort                int      `mapstructure:"debugPort"`
-	DebugPath                string   `mapstructure:"debugPath"`
+	Encoding                 EncodingType `mapstructure:"encoding" comment:"Format d'encodage des données envoyées au serveur Nudge"`
+	RecordCollecte           bool         `mapstructure:"recordCollecte" comment:"Enregistrement du rawdata brut sur disque"`
+	InsertResource           bool         `mapstructure:"insertResource" comment:"Insertion des métriques resources du poste ou est situé le collecteur OTLP (disque, memoire, cpu)"`
+	TimeoutBufferTransaction int64        `mapstructure:"timeoutBufferTransaction" comment:"Timeout du Buffer Transaction en secondes"`
+	ApplicationName          string       `mapstructure:"applicationName" comment:"Nom de l'application et du serveur, inseré dans le rawdata, par defaut APP_CCC"`
+	PrefixeServiceName       string       `mapstructure:"prefixeServiceName" comment:"Prefixe du nom de service, par defaut APP_CCC"`
+	FilterHeader             []string     `mapstructure:"filterHeader"`
+	SessionId                string       `mapstructure:"sessionId"`
+	SendUserConnectionString bool         `mapstructure:"sendUserConnectionString" comment:"Envoi de la connection string de l'utilisateur"`
+	RefreshScanDrives        float64      `mapstructure:"refreshScanDrives" comment:"Temps en minutes de rafraichissement des lecteurs physiques & logiques (CF : Worker.js), par defaut 10"`
+	RefreshLoadCPU           float64      `mapstructure:"refreshLoadCPU" comment:"Temps refresh en secondes pour le calcul de la charge CPU, par defaut 5s"`
+	WaitEndService           bool         `mapstructure:"waitEndService" comment:"Attend la fin de la trace (parentSpanId == empty) avant de faire le flush vers le rawdata, par defaut true`
+	DebugPort                int          `mapstructure:"debugPort"`
+	DebugPath                string       `mapstructure:"debugPath"`
 	// The level of telemetry to be sent to the Nudge server.
 }
 
@@ -111,9 +112,6 @@ type Config struct {
 
 	// The URL to send logs to. If omitted the Endpoint + "/v1/logs" will be used.
 	LogsEndpoint string `mapstructure:"logs_endpoint"`
-
-	// The encoding to export telemetry (default: "proto")
-	Encoding EncodingType `mapstructure:"encoding"`
 
 	// Chemin Page personnelle de Nudge
 	DebugPath string `mapstructure:"debug_path"`

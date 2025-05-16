@@ -95,6 +95,8 @@ github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
 go.opentelemetry.io/auto/sdk v1.1.0 h1:cH53jehLUN6UFLY71z+NDOiNJqDdPRaXzTel0sJySYA=
 go.opentelemetry.io/auto/sdk v1.1.0/go.mod h1:3wSPjt5PWp2RhlCcmmOial7AvC4DQqZb7a7wCow3W8A=
+go.opentelemetry.io/collector v0.121.0 h1:K23nHTjhqKDOYpBUDyeK0/Yjzs5Py8Ysvec7zyKXuK0=
+go.opentelemetry.io/collector v0.121.0/go.mod h1:M4TlnmkjIgishm2DNCk9K3hMKTmAsY9w8cNFsp9EchM=
 go.opentelemetry.io/collector v0.124.0 h1:g/dfdGFhBcQI0ggGxTmGlJnJ6Yl6T2gVxQoIj4UfXCc=
 go.opentelemetry.io/collector v0.124.0/go.mod h1:QzERYfmHUedawjr8Ph/CBEEkVqWS8IlxRLAZt+KHlCg=
 go.opentelemetry.io/collector/client v1.30.0 h1:QbvOrvwUGcnVjnIBn2zyLLubisOjgh7kMgkzDAiYpHg=
@@ -131,6 +133,8 @@ go.opentelemetry.io/collector/consumer/consumertest v0.124.0 h1:2arChG4RPrHW3lfV
 go.opentelemetry.io/collector/consumer/consumertest v0.124.0/go.mod h1:Hlu+EXbINHxVAyIT1baKO2d0j5odR3fLlLAiaP+JqQg=
 go.opentelemetry.io/collector/consumer/xconsumer v0.124.0 h1:/cut96EWVNoz6lIeGI9+EzS6UClMtnZkx5YIpkD0Xe0=
 go.opentelemetry.io/collector/consumer/xconsumer v0.124.0/go.mod h1:fHH/MpzFCRNk/4foiYE6BoXQCAMf5sJTO35uvzVrrd4=
+go.opentelemetry.io/collector/exporter v0.121.0 h1:HkE/qvnhmPtI/O/ITloukHFt4Ywmz6YzyWyWAqNGoKI=
+go.opentelemetry.io/collector/exporter v0.121.0/go.mod h1:Xi4UtotE9QdA7UGkJVxHyg4grycYIKVDp/F+henuv3k=
 go.opentelemetry.io/collector/exporter v0.124.0 h1:ii+9tU/iSrPl4+YDvqFVflksA9hUYEzwMIpmvP4JZ8w=
 go.opentelemetry.io/collector/exporter v0.124.0/go.mod h1:Q8tOEwFu3CN8VGjE4H2yZcCRG9Q60foQIyZGKPD/jig=
 go.opentelemetry.io/collector/exporter/exporterhelper/xexporterhelper v0.124.0 h1:rU8CkyMIkLnjQAM6Yjd/a2gOQ/Svsjd/8jCNKEmrStw=

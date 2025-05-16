@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"extensionlinux"
 	"fmt"
 	"html/template"
 	"io"
@@ -30,8 +31,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	extensionlinux "extensionlinux"
 
 	"gonum.org/v1/gonum/stat"
 
@@ -80,7 +79,8 @@ const (
 	Error_HTTP = 1
 	Error_SQL  = 2
 
-	Nudge_application_id = "nudge_application_id"
+	Nudge_application_id               = "nudge_application_id"
+	Nudge_application_statistique_name = "nudge_application_statistique_name"
 )
 
 type Telemetry struct {
@@ -199,10 +199,14 @@ var serverHttpOnce sync.Once
 var metricsSystemOnce sync.Once
 
 type Mesure[T any] struct {
-	StartTime time.Time `json:"startTime"`
-	EndTime   time.Time `json:"endTime"`
-	Values    []T       `json:"values"`
-	Value     T         `json:"value"`
+	StartTime   time.Time `json:"startTime"`
+	EndTime     time.Time `json:"endTime"`
+	Values      []T       `json:"values"`
+	Value       T         `json:"value"`
+	Name        string    `json:"name" comment:"Nom de la mesure"`
+	Identifiant string    `json:"identifiant" comment:"Identifiant de la mesure"`
+	Unit        string    `json:"unit" comment:"Unité de la mesure"`
+	Comment     string    `json:"comment" comment:"Commentaire de la mesure"`
 }
 
 type Metrics struct {
@@ -214,6 +218,9 @@ type Metrics struct {
 	//DiskUsage Mesure[int64] `json:"diskUsage"`
 	// Network usage in bytes
 	//NetworkUsage Mesure[int64] `json:"networkUsage"`
+
+	// Metrique de comptage des rawdata
+	NCmpt []*Mesure[float64] `json:"ncmpt"`
 }
 
 // Metriques systeme interne sans passer pas OTLP
@@ -386,7 +393,28 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 	var error_ error = nil
 	for _, application_id := range application_ids {
 		if application_id != "" {
+
 			languages, urlAppId := e.nudgeExporter.SendTransactions(application_id)
+
+			// Comptage
+			metricInterne, i := extensionlinux.Find(metricsInterne.NCmpt, func(e *Mesure[float64]) bool {
+				return e.Identifiant == application_id
+			})
+			if i < 0 {
+				metricsInterne.NCmpt = append(metricsInterne.NCmpt, &Mesure[float64]{
+					StartTime:   time.Now().UTC(),
+					EndTime:     time.Now().UTC(),
+					Value:       float64(len(e.nudgeExporter.Rawdata.Transactions)),
+					Name:        e.nudgeExporter.Rawdata.Transactions[0].TAG.Nudge_application_statistique_name,
+					Unit:        "transactions",
+					Comment:     "Nombre de transactions envoyées",
+					Identifiant: application_id,
+				})
+			} else {
+				//metricInterne.StartTime = time.Now().UTC()
+				metricInterne.EndTime = time.Now().UTC()
+				metricInterne.Value += float64(len(e.nudgeExporter.Rawdata.Transactions))
+			}
 
 			if e.nudgeExporter.Parent.Console.Verbosity.String() == "Detailed" {
 				fmt.Println(fmt.Sprintf("Transaction[%v] , language=%v , app_id=%v", len(e.nudgeExporter.Rawdata.Transactions), languages, application_id))
@@ -394,13 +422,13 @@ func (e *baseExporter) pushTraces(ctx context.Context, td ptrace.Traces) error {
 
 			var err error = nil
 			var request []byte
-			switch e.config.Encoding {
+			switch e.config.NudgeHTTPClientConfig.Encoding {
 			case EncodingJSON:
 				request, err = e.nudgeExporter.MarshalJSON()
 			case EncodingProto:
 				request, err = e.nudgeExporter.MarshalProto()
 			default:
-				err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+				err = fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
 			}
 
 			if err != nil {
@@ -872,6 +900,10 @@ func (This *NudgeExporter) TracesExportRequest2Rawdata(tr *ptracenudge.ExportReq
 					if This.Transaction.TAG.ApplicationID == "" || This.Transaction.TAG.ApplicationID != v.AsString() {
 						This.Transaction.TAG.ApplicationID = v.AsString()
 						This.Transaction.TAG.UrlAppId = This.Attributes2URL(This.Parent, attributes)
+						v2, b2 := attributes.Get(Nudge_application_statistique_name)
+						if b2 {
+							This.Transaction.TAG.StatistiqueName = v2.AsString()
+						}
 					} else {
 						// Normalement c'est une erreur dans le flux des attributs ou alors application_id n'a pas pu etre determiné par "attributes/add_app_id_java:"
 					}
@@ -1881,13 +1913,13 @@ func (e *baseExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) erro
 
 	var err error
 	var request []byte
-	switch e.config.Encoding {
+	switch e.config.NudgeHTTPClientConfig.Encoding {
 	case EncodingJSON:
 		request, err = e.nudgeExporter.MarshalJSON()
 	case EncodingProto:
 		request, err = e.nudgeExporter.MarshalProto()
 	default:
-		err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		err = fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
 	}
 
 	if err != nil {
@@ -1912,13 +1944,13 @@ func (e *baseExporter) pushLogs(ctx context.Context, ld plog.Logs) error {
 
 	var err error
 	var request []byte
-	switch e.config.Encoding {
+	switch e.config.NudgeHTTPClientConfig.Encoding {
 	case EncodingJSON:
 		request, err = e.nudgeExporter.MarshalJSON()
 	case EncodingProto:
 		request, err = e.nudgeExporter.MarshalProto()
 	default:
-		err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		err = fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
 	}
 
 	if err != nil {
@@ -1944,13 +1976,13 @@ func (e *baseExporter) pushProfiles(ctx context.Context, td pprofile.Profiles) e
 
 	var err error
 	var request []byte
-	switch e.config.Encoding {
+	switch e.config.NudgeHTTPClientConfig.Encoding {
 	case EncodingJSON:
 		request, err = e.nudgeExporter.MarshalJSON()
 	case EncodingProto:
 		request, err = e.nudgeExporter.MarshalProto()
 	default:
-		err = fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		err = fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
 	}
 
 	if err != nil {
@@ -1976,13 +2008,13 @@ func (e *baseExporter) export(ctx context.Context, url string, request []byte, p
 		return consumererror.NewPermanent(err)
 	}
 
-	switch e.config.Encoding {
+	switch e.config.NudgeHTTPClientConfig.Encoding {
 	case EncodingJSON:
 		req.Header.Set("Content-Type", jsonContentType)
 	case EncodingProto:
 		req.Header.Set("Content-Type", protobufContentType)
 	default:
-		return fmt.Errorf("invalid encoding: %s", e.config.Encoding)
+		return fmt.Errorf("invalid encoding: %s", e.config.NudgeHTTPClientConfig.Encoding)
 	}
 
 	req.Header.Set("User-Agent", e.userAgent)
@@ -2268,14 +2300,15 @@ func newServer() *Server {
 }
 
 type TransactionNudge_TAG struct {
-	Correlationid uint32
-	Urlid         uint32
-	Serveur       *Server
-	Code          string
-	TraceId       string
-	ApplicationID string
-	Language      string
-	UrlAppId      *string
+	Correlationid   uint32
+	Urlid           uint32
+	Serveur         *Server
+	Code            string
+	TraceId         string
+	ApplicationID   string
+	Language        string
+	UrlAppId        *string
+	StatistiqueName string
 }
 
 type TransactionNudge struct {
@@ -2415,7 +2448,7 @@ func (This *NudgeExporter) InitDrives() error {
 * Urilid = 2 supprime du tableau des transactions mais n'envoie pas dans le rawdata
 * Urilid = 1 garde dans le tableau des transactions jusqu'au timeout puis envoie dans le rawdata
  */
-func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string) {
+func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string, []*TransactionNudge) {
 	m := len(This.Rawdata.Transactions)
 	n := 0
 	k := len(This.Transactions)
@@ -2469,7 +2502,7 @@ func (This *NudgeExporter) SendTransactions(app_id string) ([]string, *string) {
 
 	This.Transaction = nil
 
-	return languages, urlAppId
+	return languages, urlAppId, This.Rawdata.Transactions
 }
 
 func BuildPathCollect(dateStr string, filenameN int) string {

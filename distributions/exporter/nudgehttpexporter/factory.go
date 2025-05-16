@@ -44,7 +44,6 @@ func createDefaultConfig() component.Config {
 	config := &Config{
 		RetryConfig:           configretry.NewDefaultBackOffConfig(),
 		QueueConfig:           exporterhelper.NewDefaultQueueConfig(),
-		Encoding:              EncodingProto,
 		NudgeHTTPClientConfig: clientNudgeConfig,
 	}
 
