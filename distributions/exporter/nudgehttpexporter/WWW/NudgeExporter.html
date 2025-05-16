@@ -48,10 +48,31 @@
                 <td title="{{$value.comment}}">{{$key}}</td>
                 <td title="{{$value.comment}}">{{$value.identifiant}}</td>
                 <td>{{$value.value}}</td>
-                <td>{{$values[0]}}</td>
+                <td class="format-nombre" data-value="{{index $value.values 0}}"></td>
             </tr>
             {{end}}
         </tbody>
     </table>
 </body>
+<script>
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'data-value') {
+            const el = mutation.target;
+            const val = el.dataset.value;
+            const n = parseInt(val);
+            el.textContent = isNaN(n) ? '' : n.toLocaleString('fr-FR');
+            }
+        });
+    });
+
+    document.querySelectorAll('.format-nombre').forEach(el => {
+    observer.observe(el, { attributes: true });
+    });
+
+    document.querySelectorAll('.format-nombre').forEach(span => {
+        const n = parseInt(span.dataset.value);
+        span.textContent = n.toLocaleString('fr-FR'); // "1 234 567 890"
+    });
+</script>
 </html>
